@@ -39,7 +39,7 @@ const twilioClient =
     : null;
 
 // SQLite
-const SQLITE_PATH = process.env.SQLITE_PATH || "./data/tttaxis.db";
+const SQLITE_PATH = process.env.SQLITE_PATH || "/tmp/tttaxis.db";
 const dbDir = SQLITE_PATH.includes("/") ? SQLITE_PATH.split("/").slice(0, -1).join("/") : ".";
 if (dbDir && dbDir !== "." ) {
   await import("node:fs/promises").then(fs=>fs.mkdir(dbDir, { recursive: true }).catch(()=>{}));

@@ -554,6 +554,9 @@ app.post("/admin/assign-driver", requireAdmin, (req, res) => {
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-app.listen(Number(process.env.PORT ?? 8787), () => {
-  console.log(`TTTaxis dispatch bot backend running on port ${process.env.PORT ?? 8787}`);
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`TTTaxis backend listening on port ${PORT}`);
 });
+

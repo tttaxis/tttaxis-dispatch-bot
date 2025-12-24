@@ -6,6 +6,11 @@ console.log("SERVER FILE LOADED");
 
 const app = express();
 app.use(express.json());
+
+/* =========================
+   CORS (WORDPRESS SAFE)
+========================= */
+
 app.use((req, res, next) => {
   const allowed = (process.env.PUBLIC_ORIGIN || "").split(",");
   const origin = req.headers.origin;
@@ -38,7 +43,24 @@ const NIGHT_START = Number(process.env.NIGHT_START_HOUR || 23);
 const NIGHT_MULTIPLIER = Number(process.env.NIGHT_MULTIPLIER || 1.5);
 
 /* =========================
-   UTIL: OSRM DISTANCE
+   SYSTEM PROMPT (CRITICAL)
+========================= */
+
+const SYSTEM_PROMPT = `
+You are a professional UK taxi dispatch assistant.
+
+Your job is to take taxi bookings efficiently.
+
+Rules:
+- Always extract pickup location, dropoff location, date, and time if provided.
+- If pickup and dropoff are known AND a date/time is known, you MUST call the quote_fare tool.
+- Do NOT ask repeated questions if information has already been provided.
+- After quoting a fare, ask if the customer wants to proceed with the booking.
+- Be concise, professional, and transactional.
+`;
+
+/* =========================
+   OSRM DISTANCE (NO GOOGLE)
 ========================= */
 
 async function getDistanceMiles(pickup, dropoff) {
@@ -60,7 +82,7 @@ async function getDistanceMiles(pickup, dropoff) {
 }
 
 /* =========================
-   UTIL: PRICING
+   PRICING
 ========================= */
 
 function calculateFare(miles, pickupTimeISO) {
@@ -90,11 +112,11 @@ const tools = [
       properties: {
         pickup: { type: "string" },
         dropoff: { type: "string" },
-        pickup_time_iso: { type: "string" },
+        pickup_time_iso: { type: "string" }
       },
-      required: ["pickup", "dropoff"],
-    },
-  },
+      required: ["pickup", "dropoff"]
+    }
+  }
 ];
 
 /* =========================
@@ -103,61 +125,22 @@ const tools = [
 
 app.post("/chat", async (req, res) => {
   try {
-    const messages = req.body.messages || [];
+    const userMessages = req.body.messages || [];
+
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...userMessages
+    ];
 
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: messages,
       tools,
-      tool_choice: "auto",
+      tool_choice: "auto"
     });
 
     const output = response.output[0];
 
     // TOOL CALL
     if (output.type === "tool_call") {
-      const { name, arguments: args } = output;
-
-      if (name === "quote_fare") {
-        const miles = await getDistanceMiles(args.pickup, args.dropoff);
-        const price = calculateFare(miles, args.pickup_time_iso);
-
-        return res.json({
-          reply: `That journey is approximately ${miles} miles. The estimated fare is £${price}. Would you like me to book this for you?`,
-        });
-      }
-    }
-
-    // NORMAL TEXT RESPONSE
-    if (output.content?.[0]?.text) {
-      return res.json({ reply: output.content[0].text });
-    }
-
-    res.json({ reply: "How can I help you with your taxi booking?" });
-
-  } catch (err) {
-    console.error("CHAT ERROR:", err);
-    res.json({
-      reply: "Sorry — I couldn't process that. Please call.",
-    });
-  }
-});
-
-/* =========================
-   HEALTH CHECK
-========================= */
-
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
-
-/* =========================
-   START SERVER
-========================= */
-
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`TTTaxis backend listening on port ${PORT}`);
-});
-
+      const { name, argum

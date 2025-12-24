@@ -6,6 +6,23 @@ console.log("SERVER FILE LOADED");
 
 const app = express();
 app.use(express.json());
+app.use((req, res, next) => {
+  const allowed = (process.env.PUBLIC_ORIGIN || "").split(",");
+  const origin = req.headers.origin;
+
+  if (allowed.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
 
 /* =========================
    CONFIG

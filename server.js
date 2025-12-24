@@ -131,45 +131,28 @@ function quoteFareGBP({ miles, pickup_time_iso }) {
     multiplier,
     total,
   };
-}
-
-// --------------------
-// Google Distance Matrix
-// --------------------
-const fallbackDistancesMiles = [
-  { fromMatch: /kendal/i, toMatch: /manchester airport/i, miles: 86.0, minutes: 95 },
-  { fromMatch: /kendal/i, toMatch: /lancaster/i, miles: 21.0, minutes: 35 },
-  { fromMatch: /kendal/i, toMatch: /windermere/i, miles: 9.0, minutes: 20 },
-];
-
 async function getDistanceMatrix({ pickup, dropoff }) {
-  const key = process.env.GOOGLE_MAPS_API_KEY;
-  if (!key) throw new Error("GOOGLE_MAPS_API_KEY not set");
-
-  const mode = process.env.GOOGLE_DM_MODE || "driving";
-  const region = process.env.GOOGLE_DM_REGION || "uk";
-  const language = process.env.GOOGLE_DM_LANGUAGE || "en-GB";
-
   const url =
-    "https://maps.googleapis.com/maps/api/distancematrix/json" +
-    `?origins=${encodeURIComponent(pickup)}` +
-    `&destinations=${encodeURIComponent(dropoff)}` +
-    `&mode=${encodeURIComponent(mode)}` +
-    `&region=${encodeURIComponent(region)}` +
-    `&language=${encodeURIComponent(language)}` +
-    `&units=imperial` +
-    `&key=${encodeURIComponent(key)}`;
+    "https://router.project-osrm.org/route/v1/driving/" +
+    `${encodeURIComponent(pickup)};${encodeURIComponent(dropoff)}` +
+    "?overview=false";
 
   const res = await fetch(url);
   const data = await res.json();
 
-  if (data.status !== "OK") {
-    throw new Error(`DistanceMatrix status: ${data.status}`);
+  if (!data.routes || !data.routes.length) {
+    throw new Error("OSRM route not found");
   }
-  const el = data?.rows?.[0]?.elements?.[0];
-  if (!el || el.status !== "OK") {
-    throw new Error(`DistanceMatrix element status: ${el?.status || "UNKNOWN"}`);
-  }
+
+  const meters = data.routes[0].distance;
+  const seconds = data.routes[0].duration;
+
+  return {
+    miles: Math.round((meters /ugLqkgqt 1609.34) * 10) / 10,
+    duration_minutes: Math.round(seconds / 60),
+  };
+}
+
 
   const meters = el.distance.value;
   const seconds = el.duration.value;

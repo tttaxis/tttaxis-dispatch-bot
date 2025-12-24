@@ -197,108 +197,36 @@ function buildYourWebBookerLink() {
 const tools = [
   {
     type: "function",
-    function: {
-      name: "estimate_distance",
-      description:
-        "Get trip distance (miles) and duration (minutes) using Google Distance Matrix, with a local fallback for common routes.",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          pickup: { type: "string", description: "Pickup address/place (UK)." },
-          dropoff: { type: "string", description: "Dropoff address/place (UK)." },
-        },
-        required: ["pickup", "dropoff"],
+    name: "quote_fare",
+    description: "Calculate a taxi fare based on pickup, dropoff, time, and passengers",
+    parameters: {
+      type: "object",
+      properties: {
+        pickup: { type: "string" },
+        dropoff: { type: "string" },
+        pickup_time_iso: { type: "string" },
+        passengers: { type: "number" }
       },
-    },
+      required: ["pickup", "dropoff"]
+    }
   },
   {
     type: "function",
-    function: {
-      name: "quote_fare",
-      description:
-        "Calculate fare quote in GBP using minimum fare + mileage and apply 1.5x after 23:00.",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          miles: { type: "number", description: "Trip distance in miles." },
-          pickup_time_iso: { type: "string", description: "Pickup time ISO 8601." },
-        },
-        required: ["miles", "pickup_time_iso"],
+    name: "create_booking",
+    description: "Create a taxi booking and notify dispatch",
+    parameters: {
+      type: "object",
+      properties: {
+        customer_name: { type: "string" },
+        phone: { type: "string" },
+        pickup: { type: "string" },
+        dropoff: { type: "string" },
+        price_gbp: { type: "number" }
       },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "create_booking_lead",
-      description:
-        "Create a booking lead and return booking_id and YourWebBooker link.",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          customer_name: { type: "string" },
-          customer_phone: { type: "string", description: "Customer phone number (E.164 preferred)." },
-          pickup: { type: "string" },
-          dropoff: { type: "string" },
-          pickup_time_iso: { type: "string" },
-          passengers: { type: "integer" },
-          luggage: { type: "string" },
-          notes: { type: "string" },
-          miles: { type: "number" },
-          duration_minutes: { type: "number" },
-          quoted_total_gbp: { type: "number" },
-        },
-        required: [
-          "customer_name",
-          "customer_phone",
-          "pickup",
-          "dropoff",
-          "pickup_time_iso",
-          "passengers",
-          "notes",
-          "quoted_total_gbp",
-        ],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "notify_dispatch_whatsapp",
-      description: "Send booking details to dispatch via WhatsApp.",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          booking_id: { type: "string" },
-          message: { type: "string" },
-        },
-        required: ["booking_id", "message"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "send_customer_whatsapp",
-      description:
-        "Send a WhatsApp message to the customer (e.g., booking received, confirmation, updates).",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          customer_phone: { type: "string" },
-          message: { type: "string" },
-        },
-        required: ["customer_phone", "message"],
-      },
-    },
-  },
+      required: ["pickup", "dropoff", "price_gbp"]
+    }
+  }
 ];
-
 async function runToolCall(toolCall) {
   const { name, arguments: argsJson } = toolCall.function;
   const args = JSON.parse(argsJson || "{}");

@@ -8,14 +8,13 @@ const app = express();
 app.use(express.json());
 
 /* =========================
-   CORS (WORDPRESS SAFE)
+   CORS
 ========================= */
-
 app.use((req, res, next) => {
   const allowed = (process.env.PUBLIC_ORIGIN || "").split(",");
   const origin = req.headers.origin;
 
-  if (allowed.includes(origin)) {
+  if (origin && allowed.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
 
@@ -32,7 +31,6 @@ app.use((req, res, next) => {
 /* =========================
    CONFIG
 ========================= */
-
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -43,26 +41,17 @@ const NIGHT_START = Number(process.env.NIGHT_START_HOUR || 23);
 const NIGHT_MULTIPLIER = Number(process.env.NIGHT_MULTIPLIER || 1.5);
 
 /* =========================
-   SYSTEM PROMPT (CRITICAL)
+   SYSTEM PROMPT
 ========================= */
-
-const SYSTEM_PROMPT = `
-You are a professional UK taxi dispatch assistant.
-
-Your job is to take taxi bookings efficiently.
-
-Rules:
-- Always extract pickup location, dropoff location, date, and time if provided.
-- If pickup and dropoff are known AND a date/time is known, you MUST call the quote_fare tool.
-- Do NOT ask repeated questions if information has already been provided.
-- After quoting a fare, ask if the customer wants to proceed with the booking.
-- Be concise, professional, and transactional.
-`;
+const SYSTEM_PROMPT =
+  "You are a professional UK taxi dispatch assistant. " +
+  "Your job is to take taxi bookings efficiently. " +
+  "If pickup, dropoff and time are provided, you must calculate and quote a fare. " +
+  "Do not ask for information that has already been given.";
 
 /* =========================
-   OSRM DISTANCE (NO GOOGLE)
+   OSRM DISTANCE
 ========================= */
-
 async function getDistanceMiles(pickup, dropoff) {
   const url =
     "https://router.project-osrm.org/route/v1/driving/" +
@@ -76,15 +65,12 @@ async function getDistanceMiles(pickup, dropoff) {
   }
 
   const meters = data.routes[0].distance;
-  const miles = meters / 1609.34;
-
-  return Math.round(miles * 10) / 10;
+  return Math.round((meters / 1609.34) * 10) / 10;
 }
 
 /* =========================
    PRICING
 ========================= */
-
 function calculateFare(miles, pickupTimeISO) {
   let price = Math.max(MIN_FARE, miles * PER_MILE);
 
@@ -99,48 +85,88 @@ function calculateFare(miles, pickupTimeISO) {
 }
 
 /* =========================
-   OPENAI TOOLS (FIXED)
+   OPENAI TOOLS
 ========================= */
-
 const tools = [
   {
     type: "function",
     name: "quote_fare",
-    description: "Calculate a taxi fare based on pickup, dropoff, and time",
+    description: "Calculate a taxi fare",
     parameters: {
       type: "object",
       properties: {
         pickup: { type: "string" },
         dropoff: { type: "string" },
-        pickup_time_iso: { type: "string" }
+        pickup_time_iso: { type: "string" },
       },
-      required: ["pickup", "dropoff"]
-    }
-  }
+      required: ["pickup", "dropoff"],
+    },
+  },
 ];
 
 /* =========================
    CHAT ENDPOINT
 ========================= */
-
 app.post("/chat", async (req, res) => {
   try {
     const userMessages = req.body.messages || [];
 
     const messages = [
       { role: "system", content: SYSTEM_PROMPT },
-      ...userMessages
+      ...userMessages,
     ];
 
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: messages,
       tools,
-      tool_choice: "auto"
+      tool_choice: "auto",
     });
 
     const output = response.output[0];
 
-    // TOOL CALL
     if (output.type === "tool_call") {
-      const { name, argum
+      const args = output.arguments;
+
+      const miles = await getDistanceMiles(args.pickup, args.dropoff);
+      const price = calculateFare(miles, args.pickup_time_iso);
+
+      return res.json({
+        reply:
+          `Your journey from ${args.pickup} to ${args.dropoff} ` +
+          `is approximately ${miles} miles. ` +
+          `The estimated fare is £${price}. ` +
+          `Would you like to proceed with the booking?`,
+      });
+    }
+
+    if (output.content && output.content[0] && output.content[0].text) {
+      return res.json({ reply: output.content[0].text });
+    }
+
+    res.json({ reply: "How can I help you with your taxi booking?" });
+
+  } catch (err) {
+    console.error("CHAT ERROR:", err);
+    res.json({
+      reply: "Sorry — connection issue. Please call.",
+    });
+  }
+});
+
+/* =========================
+   HEALTH
+========================= */
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+/* =========================
+   START SERVER
+========================= */
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`TTTaxis backend listening on port ${PORT}`);
+});
+

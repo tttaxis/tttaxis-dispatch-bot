@@ -1,470 +1,142 @@
-console.log("SERVER FILE LOADED");
-import "dotenv/config";
 import express from "express";
-import cors from "cors";
+import fetch from "node-fetch";
 import OpenAI from "openai";
-import twilio from "twilio";
-import { v4 as uuidv4 } from "uuid";
-import Database from "better-sqlite3";
 
-// Node 18+ has global fetch.
-// ----------------------------
+console.log("SERVER FILE LOADED");
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-const ALLOWED_ORIGINS = (process.env.PUBLIC_ORIGIN || "*")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+/* =========================
+   CONFIG
+========================= */
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (ALLOWED_ORIGINS.includes("*")) return cb(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS blocked"), false);
-    },
-    methods: ["GET", "POST"],
-  })
-);
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const MIN_FARE = Number(process.env.MIN_FARE_GBP || 8);
+const PER_MILE = Number(process.env.PER_MILE_GBP || 2.2);
+const NIGHT_START = Number(process.env.NIGHT_START_HOUR || 23);
+const NIGHT_MULTIPLIER = Number(process.env.NIGHT_MULTIPLIER || 1.5);
 
-// Twilio
-const twilioClient =
-  process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
-    ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
-    : null;
+/* =========================
+   UTIL: OSRM DISTANCE
+========================= */
 
-// SQLite
-const SQLITE_PATH = process.env.SQLITE_PATH || "/tmp/tttaxis.db";
-const dbDir = SQLITE_PATH.includes("/") ? SQLITE_PATH.split("/").slice(0, -1).join("/") : ".";
-if (dbDir && dbDir !== "." ) {
-  await import("node:fs/promises").then(fs=>fs.mkdir(dbDir, { recursive: true }).catch(()=>{}));
-} else {
-  await import("node:fs/promises").then(fs=>fs.mkdir("./data", { recursive: true }).catch(()=>{}));
-}
-const db = new Database(SQLITE_PATH);
-db.pragma("journal_mode = WAL");
-
-// Schema
-db.exec(`
-CREATE TABLE IF NOT EXISTS bookings (
-  booking_id TEXT PRIMARY KEY,
-  status TEXT NOT NULL,
-  created_at_iso TEXT NOT NULL,
-  customer_name TEXT NOT NULL,
-  customer_phone TEXT NOT NULL,
-  pickup TEXT NOT NULL,
-  dropoff TEXT NOT NULL,
-  pickup_time_iso TEXT NOT NULL,
-  passengers INTEGER NOT NULL,
-  luggage TEXT,
-  notes TEXT,
-  miles REAL,
-  duration_minutes REAL,
-  quoted_total_gbp REAL NOT NULL,
-  ywb_link TEXT
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  booking_id TEXT,
-  direction TEXT NOT NULL, -- inbound/outbound
-  from_addr TEXT,
-  to_addr TEXT,
-  body TEXT NOT NULL,
-  created_at_iso TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS drivers (
-  driver_id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  phone TEXT NOT NULL,
-  vehicle_type TEXT,
-  is_active INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS assignments (
-  booking_id TEXT PRIMARY KEY,
-  driver_id TEXT NOT NULL,
-  assigned_at_iso TEXT NOT NULL
-);
-`);
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-// --------------------
-// Pricing
-// --------------------
-function parseMoney(n) {
-  const v = Number(n);
-  if (Number.isNaN(v) || !Number.isFinite(v)) throw new Error("Invalid number");
-  return Math.round(v * 100) / 100;
-}
-function hourLocal(iso) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) throw new Error("Invalid pickup_time_iso");
-  return d.getHours();
-}
-function isNight(pickupISO) {
-  const start = Number(process.env.NIGHT_START_HOUR ?? 23);
-  return hourLocal(pickupISO) >= start;
-}
-function quoteFareGBP({ miles, pickup_time_iso }) {
-  const minFare = parseMoney(process.env.MIN_FARE_GBP ?? 8.0);
-  const perMile = parseMoney(process.env.PER_MILE_GBP ?? 2.2);
-  const base = Math.max(minFare, parseMoney(miles) * perMile);
-  const multiplier = isNight(pickup_time_iso)
-    ? parseMoney(process.env.NIGHT_MULTIPLIER ?? 1.5)
-    : 1.0;
-
-  const total = Math.round(base * multiplier * 100) / 100;
-  return {
-    currency: "GBP",
-    base: Math.round(base * 100) / 100,
-    multiplier,
-    total,
-  };
-async function getDistanceMatrix({ pickup, dropoff }) {
+async function getDistanceMiles(pickup, dropoff) {
   const url =
     "https://router.project-osrm.org/route/v1/driving/" +
-    `${encodeURIComponent(pickup)};${encodeURIComponent(dropoff)}` +
-    "?overview=false";
+    `${encodeURIComponent(pickup)};${encodeURIComponent(dropoff)}?overview=false`;
 
   const res = await fetch(url);
   const data = await res.json();
 
   if (!data.routes || !data.routes.length) {
-    throw new Error("OSRM route not found");
+    throw new Error("Route not found");
   }
 
   const meters = data.routes[0].distance;
-  const seconds = data.routes[0].duration;
-
-  return {
-    miles: Math.round((meters /ugLqkgqt 1609.34) * 10) / 10,
-    duration_minutes: Math.round(seconds / 60),
-  };
-}
-
-
-  const meters = el.distance.value;
-  const seconds = el.duration.value;
   const miles = meters / 1609.34;
-  const minutes = seconds / 60;
 
-  return {
-    miles: Math.round(miles * 10) / 10,
-    duration_minutes: Math.round(minutes),
-  };
+  return Math.round(miles * 10) / 10;
 }
 
-function getFallbackDistance({ pickup, dropoff }) {
-  for (const r of fallbackDistancesMiles) {
-    if (r.fromMatch.test(pickup) && r.toMatch.test(dropoff)) {
-      return { miles: r.miles, duration_minutes: r.minutes, fallback: true };
+/* =========================
+   UTIL: PRICING
+========================= */
+
+function calculateFare(miles, pickupTimeISO) {
+  let price = Math.max(MIN_FARE, miles * PER_MILE);
+
+  if (pickupTimeISO) {
+    const hour = new Date(pickupTimeISO).getHours();
+    if (hour >= NIGHT_START) {
+      price = price * NIGHT_MULTIPLIER;
     }
   }
-  return null;
+
+  return Math.round(price * 100) / 100;
 }
 
-// --------------------
-// WhatsApp
-// --------------------
-async function sendWhatsApp({ to, body }) {
-  if (!twilioClient) return { ok: false, error: "Twilio not configured" };
-  const msg = await twilioClient.messages.create({
-    from: process.env.TWILIO_WHATSAPP_FROM,
-    to,
-    body,
-  });
-  return { ok: true, sid: msg.sid };
-}
+/* =========================
+   OPENAI TOOLS (FIXED)
+========================= */
 
-function buildYourWebBookerLink() {
-  // Conservative link to base booking page (prefill varies by setup).
-  return process.env.YOURWEBBOOKER_BASE_URL || null;
-}
-
-// --------------------
-// Tool definitions (OpenAI Responses API)
 const tools = [
   {
     type: "function",
     name: "quote_fare",
-    description: "Calculate a taxi fare based on pickup, dropoff, time, and passengers",
+    description: "Calculate a taxi fare based on pickup, dropoff, and time",
     parameters: {
       type: "object",
       properties: {
         pickup: { type: "string" },
         dropoff: { type: "string" },
         pickup_time_iso: { type: "string" },
-        passengers: { type: "number" }
       },
-      required: ["pickup", "dropoff"]
-    }
+      required: ["pickup", "dropoff"],
+    },
   },
-  {
-    type: "function",
-    name: "create_booking",
-    description: "Create a taxi booking and notify dispatch",
-    parameters: {
-      type: "object",
-      properties: {
-        customer_name: { type: "string" },
-        phone: { type: "string" },
-        pickup: { type: "string" },
-        dropoff: { type: "string" },
-        price_gbp: { type: "number" }
-      },
-      required: ["pickup", "dropoff", "price_gbp"]
-    }
-  }
 ];
-async function runToolCall(toolCall) {
-  const { name, arguments: argsJson } = toolCall.function;
-  const args = JSON.parse(argsJson || "{}");
 
-  if (name === "estimate_distance") {
-    try {
-      const dm = await getDistanceMatrix(args);
-      return { ...dm, fallback: false };
-    } catch (e) {
-      const fb = getFallbackDistance(args);
-      if (fb) return fb;
-      throw e;
-    }
-  }
+/* =========================
+   CHAT ENDPOINT
+========================= */
 
-  if (name === "quote_fare") {
-    return quoteFareGBP(args);
-  }
-
-  if (name === "create_booking_lead") {
-    const booking_id = uuidv4();
-    const ywb_link = buildYourWebBookerLink();
-
-    const stmt = db.prepare(`
-      INSERT INTO bookings (
-        booking_id, status, created_at_iso,
-        customer_name, customer_phone,
-        pickup, dropoff, pickup_time_iso,
-        passengers, luggage, notes,
-        miles, duration_minutes,
-        quoted_total_gbp, ywb_link
-      ) VALUES (
-        @booking_id, @status, @created_at_iso,
-        @customer_name, @customer_phone,
-        @pickup, @dropoff, @pickup_time_iso,
-        @passengers, @luggage, @notes,
-        @miles, @duration_minutes,
-        @quoted_total_gbp, @ywb_link
-      )
-    `);
-
-    stmt.run({
-      booking_id,
-      status: "NEW",
-      created_at_iso: nowIso(),
-      customer_name: args.customer_name,
-      customer_phone: args.customer_phone,
-      pickup: args.pickup,
-      dropoff: args.dropoff,
-      pickup_time_iso: args.pickup_time_iso,
-      passengers: args.passengers,
-      luggage: args.luggage || "",
-      notes: args.notes || "",
-      miles: args.miles ?? null,
-      duration_minutes: args.duration_minutes ?? null,
-      quoted_total_gbp: args.quoted_total_gbp,
-      ywb_link,
-    });
-
-    return { booking_id, ywb_link };
-  }
-
-  if (name === "notify_dispatch_whatsapp") {
-    const to = process.env.DISPATCH_WHATSAPP_TO;
-    const result = await sendWhatsApp({ to, body: args.message });
-    if (result.ok) {
-      db.prepare(
-        `INSERT INTO messages (booking_id, direction, from_addr, to_addr, body, created_at_iso)
-         VALUES (?, 'outbound', ?, ?, ?, ?)`
-      ).run(args.booking_id, process.env.TWILIO_WHATSAPP_FROM, to, args.message, nowIso());
-    }
-    return result;
-  }
-
-  if (name === "send_customer_whatsapp") {
-    const to = `whatsapp:${args.customer_phone.replace(/^whatsapp:/, "")}`;
-    const result = await sendWhatsApp({ to, body: args.message });
-    if (result.ok) {
-      db.prepare(
-        `INSERT INTO messages (booking_id, direction, from_addr, to_addr, body, created_at_iso)
-         VALUES (NULL, 'outbound', ?, ?, ?, ?)`
-      ).run(process.env.TWILIO_WHATSAPP_FROM, to, args.message, nowIso());
-    }
-    return result;
-  }
-
-  throw new Error(`Unknown tool: ${name}`);
-}
-
-// --------------------
-// System prompt
-const SYSTEM = `
-You are TTTaxis Dispatch Assistant for a UK taxi operator.
-
-Objective:
-- Take booking requests, estimate distance via tool, quote price using min fare + mileage and night multiplier after 23:00,
-- Create a booking lead,
-- Notify dispatch via WhatsApp,
-- Optionally send a WhatsApp acknowledgement to the customer.
-
-Operating rules:
-- Collect: pickup, dropoff, pickup date/time, passengers.
-- Confirm phone number (UK), name, and any luggage/accessibility needs.
-- Use estimate_distance once you have pickup and dropoff.
-- Use quote_fare once you have miles and pickup_time_iso.
-- Present the quote clearly as GBP and mention night rate if applicable.
-- Ask for confirmation: "Shall I submit this to dispatch now?"
-- If yes: create_booking_lead, then notify_dispatch_whatsapp with a clean one-message summary.
-- After submitting, offer a YourWebBooker link for card payment/confirmation.
-- Always provide a fallback: "Call 01539 556160" if anything fails or urgency is high.
-- Do not claim a driver is assigned unless dispatch confirms.
-`;
-
-// --------------------
-// Chat endpoint
 app.post("/chat", async (req, res) => {
   try {
-    const { messages } = req.body || {};
-    if (!Array.isArray(messages)) return res.status(400).json({ error: "messages must be an array" });
+    const messages = req.body.messages || [];
 
-    let response = await openai.responses.create({
-      model: process.env.OPENAI_MODEL ?? "gpt-4.1-mini",
-      input: [{ role: "system", content: SYSTEM }, ...messages],
+    const response = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: messages,
       tools,
+      tool_choice: "auto",
     });
 
-    // Loop tool calls
-    while (response.output?.some((o) => o.type === "tool_call")) {
-      const toolCalls = response.output.filter((o) => o.type === "tool_call");
-      const toolOutputs = [];
-      for (const tc of toolCalls) {
-        const out = await runToolCall(tc);
-        toolOutputs.push({ type: "tool_output", tool_call_id: tc.id, output: JSON.stringify(out) });
-      }
+    const output = response.output[0];
 
-      response = await openai.responses.create({
-        model: process.env.OPENAI_MODEL ?? "gpt-4.1-mini",
-        input: [{ role: "system", content: SYSTEM }, ...messages, ...toolOutputs],
-        tools,
-      });
-    }
+    // TOOL CALL
+    if (output.type === "tool_call") {
+      const { name, arguments: args } = output;
 
-    const textParts = (response.output || [])
-      .filter((o) => o.type === "message")
-      .flatMap((m) => m.content || [])
-      .filter((c) => c.type === "output_text")
-      .map((c) => c.text);
+      if (name === "quote_fare") {
+        const miles = await getDistanceMiles(args.pickup, args.dropoff);
+        const price = calculateFare(miles, args.pickup_time_iso);
 
-    res.json({ reply: textParts.join("\n") });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// --------------------
-// Twilio inbound WhatsApp (two-way)
-app.post("/twilio/whatsapp", async (req, res) => {
-  try {
-    const from = req.body.From; // whatsapp:+44...
-    const to = req.body.To;
-    const body = (req.body.Body || "").trim();
-
-    // Log inbound message
-    db.prepare(
-      `INSERT INTO messages (booking_id, direction, from_addr, to_addr, body, created_at_iso)
-       VALUES (NULL, 'inbound', ?, ?, ?, ?)`
-    ).run(from, to, body, nowIso());
-
-    // Best-effort: find most recent booking by this phone
-    const row = db
-      .prepare(
-        `SELECT booking_id FROM bookings WHERE customer_phone = ? ORDER BY created_at_iso DESC LIMIT 1`
-      )
-      .get(from.replace(/^whatsapp:/, ""));
-
-    if (row?.booking_id) {
-      // Update status if customer says confirm/cancel
-      const lower = body.toLowerCase();
-      if (/\bcancel\b/.test(lower)) {
-        db.prepare(`UPDATE bookings SET status='CANCEL_REQUESTED' WHERE booking_id=?`).run(row.booking_id);
-      } else if (/\bconfirm\b/.test(lower) || /\byes\b/.test(lower)) {
-        db.prepare(`UPDATE bookings SET status='CUSTOMER_CONFIRMED' WHERE booking_id=?`).run(row.booking_id);
-      }
-      // Notify dispatch that customer replied
-      const dispatchMsg = `Customer reply for booking ${row.booking_id}:\n${body}`;
-      if (process.env.DISPATCH_WHATSAPP_TO) {
-        await sendWhatsApp({ to: process.env.DISPATCH_WHATSAPP_TO, body: dispatchMsg });
+        return res.json({
+          reply: `That journey is approximately ${miles} miles. The estimated fare is £${price}. Would you like me to book this for you?`,
+        });
       }
     }
 
-    // Twilio expects 200 OK; respond with empty TwiML to avoid auto-reply
-    res.set("Content-Type", "text/xml");
-    res.send(`<?xml version="1.0" encoding="UTF-8"?><Response></Response>`);
-  } catch (e) {
-    console.error(e);
-    res.status(200).send(`<?xml version="1.0" encoding="UTF-8"?><Response></Response>`);
+    // NORMAL TEXT RESPONSE
+    if (output.content?.[0]?.text) {
+      return res.json({ reply: output.content[0].text });
+    }
+
+    res.json({ reply: "How can I help you with your taxi booking?" });
+
+  } catch (err) {
+    console.error("CHAT ERROR:", err);
+    res.json({
+      reply: "Sorry — I couldn't process that. Please call.",
+    });
   }
 });
 
-// --------------------
-// Basic admin endpoints (scaffolding)
-function requireAdmin(req, res, next) {
-  // Lightweight: require a header token (set this behind Cloudflare/SG auth for real use)
-  const token = req.header("x-tttaxis-admin");
-  if (!token || token !== (process.env.ADMIN_TOKEN || "change-me")) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
-  next();
-}
+/* =========================
+   HEALTH CHECK
+========================= */
 
-app.get("/admin/bookings", requireAdmin, (req, res) => {
-  const rows = db.prepare(`SELECT * FROM bookings ORDER BY created_at_iso DESC LIMIT 200`).all();
-  res.json({ bookings: rows });
-});
-
-app.post("/admin/assign-driver", requireAdmin, (req, res) => {
-  // Driver app later: for now dispatch can assign a driver id
-  const { booking_id, driver_id } = req.body || {};
-  if (!booking_id || !driver_id) return res.status(400).json({ error: "booking_id and driver_id required" });
-
-  const booking = db.prepare(`SELECT booking_id FROM bookings WHERE booking_id=?`).get(booking_id);
-  const driver = db.prepare(`SELECT driver_id FROM drivers WHERE driver_id=?`).get(driver_id);
-  if (!booking) return res.status(404).json({ error: "booking not found" });
-  if (!driver) return res.status(404).json({ error: "driver not found" });
-
-  db.prepare(
-    `INSERT INTO assignments (booking_id, driver_id, assigned_at_iso)
-     VALUES (?, ?, ?)
-     ON CONFLICT(booking_id) DO UPDATE SET driver_id=excluded.driver_id, assigned_at_iso=excluded.assigned_at_iso`
-  ).run(booking_id, driver_id, nowIso());
-
-  db.prepare(`UPDATE bookings SET status='DRIVER_ASSIGNED' WHERE booking_id=?`).run(booking_id);
-
+app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+/* =========================
+   START SERVER
+========================= */
 
 const PORT = process.env.PORT || 3000;
 

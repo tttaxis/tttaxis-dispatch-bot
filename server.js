@@ -105,6 +105,14 @@ function calculateFareGBP(miles, pickupTimeISO) {
 /* =========================
    CHAT ENDPOINT
 ========================= */
+app.options("/chat", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  return res.sendStatus(200);
+});
+
+
 app.post("/chat", async (req, res) => {
   try {
     const messages = req.body.messages || [];

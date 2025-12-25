@@ -5,10 +5,17 @@ import OpenAI from "openai";
 console.log("SERVER FILE LOADED");
 
 const app = express();
+import express from "express";
+import fetch from "node-fetch";
+import OpenAI from "openai";
+
+console.log("SERVER FILE LOADED");
+
+const app = express();
 app.use(express.json());
 
 /* =========================
-   CORS
+   CORS (WordPress Safe)
 ========================= */
 app.use((req, res, next) => {
   const allowed = (process.env.PUBLIC_ORIGIN || "").split(",");
@@ -35,9 +42,9 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const MIN_FARE = Number(process.env.MIN_FARE_GBP || 8);
-const PER_MILE = Number(process.env.PER_MILE_GBP || 2.2);
-const NIGHT_START = Number(process.env.NIGHT_START_HOUR || 23);
+const MIN_FARE_GBP = Number(process.env.MIN_FARE_GBP || 8);
+const PER_MILE_GBP = Number(process.env.PER_MILE_GBP || 2.2);
+const NIGHT_START_HOUR = Number(process.env.NIGHT_START_HOUR || 23);
 const NIGHT_MULTIPLIER = Number(process.env.NIGHT_MULTIPLIER || 1.5);
 
 /* =========================
@@ -45,12 +52,44 @@ const NIGHT_MULTIPLIER = Number(process.env.NIGHT_MULTIPLIER || 1.5);
 ========================= */
 const SYSTEM_PROMPT =
   "You are a professional UK taxi dispatch assistant. " +
-  "Your job is to take taxi bookings efficiently. " +
-  "If pickup, dropoff and time are provided, you must calculate and quote a fare. " +
-  "Do not ask for information that has already been given.";
+  "You take taxi bookings and quote fares in GBP (£). " +
+  "If pickup, dropoff, and time/date are provided, you must quote a fare immediately. " +
+  "Do not ask for information that has already been provided.";
 
 /* =========================
-   OSRM DISTANCE
+   DETERMINISTIC EXTRACTION
+========================= */
+function extractBookingFromText(text) {
+  if (!text) return null;
+
+  const lower = text.toLowerCase();
+
+  // match "kendal to manchester airport"
+  const routeMatch = lower.match(/(.+?)\s+to\s+(.+?)(\s|$)/);
+
+  // match "23:30 25/12/2025"
+  const timeDateMatch = lower.match(
+    /(\d{1,2}:\d{2})\s+(\d{2}\/\d{2}\/\d{4})/
+  );
+
+  if (!routeMatch) return null;
+
+  const pickup = routeMatch[1].trim();
+  const dropoff = routeMatch[2].trim();
+
+  let pickup_time_iso = null;
+
+  if (timeDateMatch) {
+    const [_, time, date] = timeDateMatch;
+    const [day, month, year] = date.split("/");
+    pickup_time_iso = `${year}-${month}-${day}T${time}:00`;
+  }
+
+  return { pickup, dropoff, pickup_time_iso };
+}
+
+/* =========================
+   OSRM DISTANCE (NO GOOGLE)
 ========================= */
 async function getDistanceMiles(pickup, dropoff) {
   const url =
@@ -69,14 +108,14 @@ async function getDistanceMiles(pickup, dropoff) {
 }
 
 /* =========================
-   PRICING
+   PRICING (GBP ONLY)
 ========================= */
-function calculateFare(miles, pickupTimeISO) {
-  let price = Math.max(MIN_FARE, miles * PER_MILE);
+function calculateFareGBP(miles, pickupTimeISO) {
+  let price = Math.max(MIN_FARE_GBP, miles * PER_MILE_GBP);
 
   if (pickupTimeISO) {
     const hour = new Date(pickupTimeISO).getHours();
-    if (hour >= NIGHT_START) {
+    if (hour >= NIGHT_START_HOUR) {
       price = price * NIGHT_MULTIPLIER;
     }
   }
@@ -85,13 +124,13 @@ function calculateFare(miles, pickupTimeISO) {
 }
 
 /* =========================
-   OPENAI TOOLS
+   OPENAI TOOL (SCHEMA SAFE)
 ========================= */
 const tools = [
   {
     type: "function",
     name: "quote_fare",
-    description: "Calculate a taxi fare",
+    description: "Quote a UK taxi fare in GBP (£)",
     parameters: {
       type: "object",
       properties: {
@@ -110,7 +149,33 @@ const tools = [
 app.post("/chat", async (req, res) => {
   try {
     const userMessages = req.body.messages || [];
+    const lastUser = userMessages[userMessages.length - 1]?.content;
 
+    /* ---- FORCE QUOTE IF DATA PRESENT ---- */
+    const extracted = extractBookingFromText(lastUser);
+
+    if (extracted) {
+      const miles = await getDistanceMiles(
+        extracted.pickup,
+        extracted.dropoff
+      );
+
+      const price = calculateFareGBP(
+        miles,
+        extracted.pickup_time_iso
+      );
+
+      return res.json({
+        reply:
+          `Your journey from ${extracted.pickup} to ${extracted.dropoff} ` +
+          `at ${extracted.pickup_time_iso || "the requested time"} ` +
+          `is approximately ${miles} miles. ` +
+          `The estimated fare is £${price}. ` +
+          `Would you like me to proceed with the booking?`,
+      });
+    }
+
+    /* ---- FALL BACK TO AI ---- */
     const messages = [
       { role: "system", content: SYSTEM_PROMPT },
       ...userMessages,
@@ -125,22 +190,7 @@ app.post("/chat", async (req, res) => {
 
     const output = response.output[0];
 
-    if (output.type === "tool_call") {
-      const args = output.arguments;
-
-      const miles = await getDistanceMiles(args.pickup, args.dropoff);
-      const price = calculateFare(miles, args.pickup_time_iso);
-
-      return res.json({
-        reply:
-          `Your journey from ${args.pickup} to ${args.dropoff} ` +
-          `is approximately ${miles} miles. ` +
-          `The estimated fare is £${price}. ` +
-          `Would you like to proceed with the booking?`,
-      });
-    }
-
-    if (output.content && output.content[0] && output.content[0].text) {
+    if (output.content && output.content[0]?.text) {
       return res.json({ reply: output.content[0].text });
     }
 
@@ -155,7 +205,7 @@ app.post("/chat", async (req, res) => {
 });
 
 /* =========================
-   HEALTH
+   HEALTH CHECK
 ========================= */
 app.get("/health", (req, res) => {
   res.json({ ok: true });

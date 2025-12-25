@@ -1,12 +1,4 @@
 import express from "express";
-import fetch from "node-fetch";
-import OpenAI from "openai";
-
-console.log("SERVER FILE LOADED");
-
-const app = express();
-import express from "express";
-import fetch from "node-fetch";
 import OpenAI from "openai";
 
 console.log("SERVER FILE LOADED");
@@ -15,7 +7,7 @@ const app = express();
 app.use(express.json());
 
 /* =========================
-   CORS (WordPress Safe)
+   CORS
 ========================= */
 app.use((req, res, next) => {
   const allowed = (process.env.PUBLIC_ORIGIN || "").split(",");
@@ -48,26 +40,14 @@ const NIGHT_START_HOUR = Number(process.env.NIGHT_START_HOUR || 23);
 const NIGHT_MULTIPLIER = Number(process.env.NIGHT_MULTIPLIER || 1.5);
 
 /* =========================
-   SYSTEM PROMPT
-========================= */
-const SYSTEM_PROMPT =
-  "You are a professional UK taxi dispatch assistant. " +
-  "You take taxi bookings and quote fares in GBP (£). " +
-  "If pickup, dropoff, and time/date are provided, you must quote a fare immediately. " +
-  "Do not ask for information that has already been provided.";
-
-/* =========================
-   DETERMINISTIC EXTRACTION
+   BOOKING EXTRACTION
 ========================= */
 function extractBookingFromText(text) {
   if (!text) return null;
 
   const lower = text.toLowerCase();
 
-  // match "kendal to manchester airport"
   const routeMatch = lower.match(/(.+?)\s+to\s+(.+?)(\s|$)/);
-
-  // match "23:30 25/12/2025"
   const timeDateMatch = lower.match(
     /(\d{1,2}:\d{2})\s+(\d{2}\/\d{2}\/\d{4})/
   );
@@ -80,7 +60,7 @@ function extractBookingFromText(text) {
   let pickup_time_iso = null;
 
   if (timeDateMatch) {
-    const [_, time, date] = timeDateMatch;
+    const [, time, date] = timeDateMatch;
     const [day, month, year] = date.split("/");
     pickup_time_iso = `${year}-${month}-${day}T${time}:00`;
   }
@@ -89,7 +69,7 @@ function extractBookingFromText(text) {
 }
 
 /* =========================
-   OSRM DISTANCE (NO GOOGLE)
+   OSRM DISTANCE (BUILT-IN FETCH)
 ========================= */
 async function getDistanceMiles(pickup, dropoff) {
   const url =
@@ -103,8 +83,7 @@ async function getDistanceMiles(pickup, dropoff) {
     throw new Error("Route not found");
   }
 
-  const meters = data.routes[0].distance;
-  return Math.round((meters / 1609.34) * 10) / 10;
+  return Math.round((data.routes[0].distance / 1609.34) * 10) / 10;
 }
 
 /* =========================
@@ -116,7 +95,7 @@ function calculateFareGBP(miles, pickupTimeISO) {
   if (pickupTimeISO) {
     const hour = new Date(pickupTimeISO).getHours();
     if (hour >= NIGHT_START_HOUR) {
-      price = price * NIGHT_MULTIPLIER;
+      price *= NIGHT_MULTIPLIER;
     }
   }
 
@@ -124,34 +103,13 @@ function calculateFareGBP(miles, pickupTimeISO) {
 }
 
 /* =========================
-   OPENAI TOOL (SCHEMA SAFE)
-========================= */
-const tools = [
-  {
-    type: "function",
-    name: "quote_fare",
-    description: "Quote a UK taxi fare in GBP (£)",
-    parameters: {
-      type: "object",
-      properties: {
-        pickup: { type: "string" },
-        dropoff: { type: "string" },
-        pickup_time_iso: { type: "string" },
-      },
-      required: ["pickup", "dropoff"],
-    },
-  },
-];
-
-/* =========================
    CHAT ENDPOINT
 ========================= */
 app.post("/chat", async (req, res) => {
   try {
-    const userMessages = req.body.messages || [];
-    const lastUser = userMessages[userMessages.length - 1]?.content;
+    const messages = req.body.messages || [];
+    const lastUser = messages[messages.length - 1]?.content;
 
-    /* ---- FORCE QUOTE IF DATA PRESENT ---- */
     const extracted = extractBookingFromText(lastUser);
 
     if (extracted) {
@@ -175,26 +133,16 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    /* ---- FALL BACK TO AI ---- */
-    const messages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...userMessages,
-    ];
-
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: messages,
-      tools,
-      tool_choice: "auto",
     });
 
-    const output = response.output[0];
-
-    if (output.content && output.content[0]?.text) {
-      return res.json({ reply: output.content[0].text });
-    }
-
-    res.json({ reply: "How can I help you with your taxi booking?" });
+    res.json({
+      reply:
+        response.output_text ||
+        "How can I help you with your taxi booking?",
+    });
 
   } catch (err) {
     console.error("CHAT ERROR:", err);
@@ -205,14 +153,14 @@ app.post("/chat", async (req, res) => {
 });
 
 /* =========================
-   HEALTH CHECK
+   HEALTH
 ========================= */
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
 /* =========================
-   START SERVER
+   START
 ========================= */
 const PORT = process.env.PORT || 3000;
 

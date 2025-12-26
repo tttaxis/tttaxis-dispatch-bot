@@ -180,6 +180,29 @@ function calculateFareGBP(miles, isoTime) {
 
   return Math.round(price * 100) / 100;
 }
+async function sendWhatsAppBooking(booking) {
+  if (!twilioClient) return;
+
+  const message =
+    `🚕 *New TTTaxis Booking*\n\n` +
+    `Ref: ${booking.id}\n` +
+    `Pickup: ${booking.pickup}\n` +
+    `Dropoff: ${booking.dropoff}\n` +
+    (booking.pickup_time_iso ? `Time: ${booking.pickup_time_iso}\n` : "") +
+    `Fare: £${booking.price_gbp}\n\n` +
+    `Customer: ${booking.customer_name}\n` +
+    `Phone: ${booking.customer_phone}`;
+
+  try {
+    await twilioClient.messages.create({
+      from: process.env.TWILIO_WHATSAPP_FROM,
+      to: process.env.DISPATCH_WHATSAPP_TO,
+      body: message,
+    });
+  } catch (err) {
+    console.error("WHATSAPP ERROR:", err);
+  }
+}
 
 /* ======================================================
    SESSION STATE

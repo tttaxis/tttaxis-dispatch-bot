@@ -261,6 +261,7 @@ app.post("/chat", async (req, res) => {
         customer_phone: np.phone,
         status: "NEW"
       };
+sendWhatsAppBooking(booking);
 
       const bookings = readBookings();
       bookings.unshift(booking);

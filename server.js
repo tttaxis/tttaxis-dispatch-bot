@@ -1,3 +1,5 @@
+import nodemailer from "nodemailer";
+
 import express from "express";
 
 const app = express();

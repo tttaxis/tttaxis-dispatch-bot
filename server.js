@@ -7,6 +7,11 @@ console.log("SERVER FILE LOADED");
 
 const app = express();
 app.use(express.json());
+const FIXED_AIRPORT_FARES = {
+  "Manchester Airport": 85.00,
+  "Leeds Bradford Airport": 78.00,
+  "Liverpool John Lennon Airport": 90.00
+};
 
 /* ======================================================
    OPTIONS + CORS

@@ -1,6 +1,5 @@
-import nodemailer from "nodemailer";
-
 import express from "express";
+import nodemailer from "nodemailer";
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -29,14 +28,23 @@ app.use((req, res, next) => {
 app.options("*", (_, res) => res.sendStatus(200));
 
 /* =====================================================
-   PRICING RULES (LOCKED)
+   EMAIL (SMTP)
+===================================================== */
+const mailer = nodemailer.createTransport({
+  host: process.env.EMAIL_HOST,
+  port: Number(process.env.EMAIL_PORT),
+  secure: false,
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
+
+/* =====================================================
+   PRICING RULES
 ===================================================== */
 const MIN_FARE = 4.20;
-
-// Local journeys
 const LOCAL_PRICE_PER_MILE = 2.20;
-
-// Airport journeys are fixed (≈ £1.50/mile baked in)
 const NIGHT_MULTIPLIER = 1.5;
 const NIGHT_START_HOUR = 23;
 
@@ -71,7 +79,7 @@ function getFixedRouteFare(pickup, dropoff) {
 }
 
 /* =====================================================
-   OPENSTREETMAP ROUTING (OSRM + NOMINATIM)
+   OPENSTREETMAP ROUTING (NO GOOGLE)
 ===================================================== */
 async function getMiles(pickup, dropoff) {
   async function geocode(place) {
@@ -92,12 +100,9 @@ async function getMiles(pickup, dropoff) {
   );
   const routeData = await routeRes.json();
 
-  if (!routeData.routes?.[0]) {
-    throw new Error("Route not found");
-  }
+  if (!routeData.routes?.[0]) throw new Error("Route not found");
 
-  const meters = routeData.routes[0].distance;
-  return meters / 1609.34;
+  return routeData.routes[0].distance / 1609.34;
 }
 
 /* =====================================================
@@ -127,16 +132,11 @@ app.post("/quote", async (req, res) => {
       return res.status(400).json({ error: "Missing locations" });
     }
 
-    // Fixed airport fare (NO night uplift)
     const fixedFare = getFixedRouteFare(pickup, dropoff);
     if (fixedFare !== null) {
-      return res.json({
-        fixed: true,
-        price_gbp: fixedFare
-      });
+      return res.json({ fixed: true, price_gbp: fixedFare });
     }
 
-    // Local journey pricing
     const miles = await getMiles(pickup, dropoff);
     const price = calculateLocalFare(miles, pickup_time_iso);
 
@@ -145,7 +145,6 @@ app.post("/quote", async (req, res) => {
       miles: Math.round(miles * 10) / 10,
       price_gbp: price
     });
-
   } catch (err) {
     console.error("QUOTE ERROR:", err);
     res.status(500).json({ error: "Quote failed" });
@@ -153,22 +152,28 @@ app.post("/quote", async (req, res) => {
 });
 
 /* =====================================================
-   BOOK ENDPOINT
+   BOOK + EMAIL CONFIRMATION
 ===================================================== */
-app.post("/book", (req, res) => {
-  const id = Math.random().toString(36).slice(2, 8).toUpperCase();
-  res.json({ success: true, booking: { id } });
-});
+app.post("/book", async (req, res) => {
+  try {
+    const {
+      pickup,
+      dropoff,
+      pickup_time_iso,
+      name,
+      phone,
+      email,
+      price_gbp
+    } = req.body;
 
-/* =====================================================
-   HEALTH CHECK
-===================================================== */
-app.get("/health", (_, res) => res.send("OK"));
+    if (!pickup || !dropoff || !name || !phone) {
+      return res.status(400).json({ success: false });
+    }
 
-/* =====================================================
-   START SERVER
-===================================================== */
-app.listen(PORT, () => {
-  console.log(`TTTaxis backend listening on port ${PORT}`);
-});
+    const bookingId = Math.random()
+      .toString(36)
+      .slice(2, 8)
+      .toUpperCase();
+
+    const timeText = pickup_time_i
 

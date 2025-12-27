@@ -2,6 +2,17 @@ import express from "express";
 import fs from "fs";
 import path from "path";
 import nodemailer from "nodemailer";
+import express from "express";
+const app = express();
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "https://tttaxis.uk");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  next();
+});
+app.options("*", (req, res) => {
+  res.sendStatus(200);
+});
 
 console.log("SERVER FILE LOADED");
 

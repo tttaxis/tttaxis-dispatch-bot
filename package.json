@@ -1,18 +1,16 @@
-npm install @messagebird/sdk
-
 {
   "name": "tttaxis-dispatch",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "description": "TTTaxis booking backend with live pricing and booking confirmation",
   "type": "module",
-  "private": true,
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {
-    "express": "^4.19.2",
-    "twilio": "^5.3.0"
-  },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
   }
 }

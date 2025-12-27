@@ -1,3 +1,5 @@
+npm install @messagebird/sdk
+
 {
   "name": "tttaxis-dispatch",
   "version": "1.0.0",

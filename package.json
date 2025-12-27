@@ -1,7 +1,7 @@
 {
   "name": "tttaxis-dispatch",
-  "version": "1.1.0",
-  "description": "TTTaxis booking backend with live pricing and booking confirmation",
+  "version": "1.2.0",
+  "description": "TTTaxis booking backend with live pricing and email confirmations",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -11,6 +11,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "nodemailer": "^6.9.8"
   }
 }

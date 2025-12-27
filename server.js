@@ -1,5 +1,4 @@
 import express from "express";
-import fetch from "node-fetch";
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -35,10 +34,7 @@ const MIN_FARE = 4.20;
 // Local journeys
 const LOCAL_PRICE_PER_MILE = 2.20;
 
-// Airport reference rate (informational only)
-const AIRPORT_REFERENCE_RATE = 1.50;
-
-// Night uplift applies ONLY to local journeys
+// Airport journeys are fixed (≈ £1.50/mile baked in)
 const NIGHT_MULTIPLIER = 1.5;
 const NIGHT_START_HOUR = 23;
 
@@ -73,12 +69,13 @@ function getFixedRouteFare(pickup, dropoff) {
 }
 
 /* =====================================================
-   OPENSTREETMAP ROUTING (OSRM)
+   OPENSTREETMAP ROUTING (OSRM + NOMINATIM)
 ===================================================== */
 async function getMiles(pickup, dropoff) {
   async function geocode(place) {
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(place + ", UK")}`
+      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(place + ", UK")}`,
+      { headers: { "User-Agent": "TTTaxis/1.0" } }
     );
     const data = await res.json();
     if (!data[0]) throw new Error("Location not found");
@@ -93,7 +90,7 @@ async function getMiles(pickup, dropoff) {
   );
   const routeData = await routeRes.json();
 
-  if (!routeData.routes || !routeData.routes[0]) {
+  if (!routeData.routes?.[0]) {
     throw new Error("Route not found");
   }
 
@@ -128,7 +125,7 @@ app.post("/quote", async (req, res) => {
       return res.status(400).json({ error: "Missing locations" });
     }
 
-    // 1️⃣ Fixed airport fare (NO night uplift)
+    // Fixed airport fare (NO night uplift)
     const fixedFare = getFixedRouteFare(pickup, dropoff);
     if (fixedFare !== null) {
       return res.json({
@@ -137,7 +134,7 @@ app.post("/quote", async (req, res) => {
       });
     }
 
-    // 2️⃣ Local journey pricing
+    // Local journey pricing
     const miles = await getMiles(pickup, dropoff);
     const price = calculateLocalFare(miles, pickup_time_iso);
 
@@ -158,11 +155,7 @@ app.post("/quote", async (req, res) => {
 ===================================================== */
 app.post("/book", (req, res) => {
   const id = Math.random().toString(36).slice(2, 8).toUpperCase();
-
-  res.json({
-    success: true,
-    booking: { id }
-  });
+  res.json({ success: true, booking: { id } });
 });
 
 /* =====================================================
@@ -176,3 +169,4 @@ app.get("/health", (_, res) => res.send("OK"));
 app.listen(PORT, () => {
   console.log(`TTTaxis backend listening on port ${PORT}`);
 });
+

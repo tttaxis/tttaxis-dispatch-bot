@@ -7,34 +7,16 @@ console.log("SERVER FILE LOADED");
 
 const app = express();
 app.use(express.json());
-const FIXED_AIRPORT_FARES = {
-  "Manchester Airport": 85.00,
-  "Leeds Bradford Airport": 78.00,
-  "Liverpool John Lennon Airport": 90.00
-};
 
 /* ======================================================
-   OPTIONS + CORS
+   BASIC CORS
 ====================================================== */
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     return res.status(200).end();
-  }
-  next();
-});
-
-app.use((req, res, next) => {
-  const allowed = (process.env.PUBLIC_ORIGIN || "")
-    .split(",")
-    .map(v => v.trim())
-    .filter(Boolean);
-
-  const origin = req.headers.origin;
-  if (origin && allowed.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
   }
   next();
 });
@@ -47,16 +29,24 @@ const PER_MILE_GBP = Number(process.env.PER_MILE_GBP || 2.2);
 const NIGHT_START_HOUR = Number(process.env.NIGHT_START_HOUR || 23);
 const NIGHT_MULTIPLIER = Number(process.env.NIGHT_MULTIPLIER || 1.5);
 
+const FIXED_ROUTE_FARES = [
+  { from: "Lancaster", to: "Manchester Airport", price: 90.00 },
+  { from: "Kendal", to: "Manchester Airport", price: 120.00 },
+  { from: "Kendal", to: "Leeds Bradford Airport", price: 98.00 },
+  { from: "Lancaster", to: "Leeds Bradford Airport", price: 111.00 },
+  { from: "Kendal", to: "Liverpool John Lennon Airport", price: 132.00 },
+  { from: "Lancaster", to: "Liverpool John Lennon Airport", price: 102.00 }
+];
+
 const DATA_DIR = process.env.DATA_DIR || "/tmp/tttaxis";
 const BOOKINGS_PATH = path.join(DATA_DIR, "bookings.json");
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 
 /* ======================================================
    STORAGE
 ====================================================== */
 function ensureStorage() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(BOOKINGS_PATH)) fs.writeFileSync(BOOKINGS_PATH, "[]", "utf8");
+  if (!fs.existsSync(BOOKINGS_PATH)) fs.writeFileSync(BOOKINGS_PATH, "[]");
 }
 
 function readBookings() {
@@ -66,7 +56,7 @@ function readBookings() {
 
 function writeBookings(data) {
   ensureStorage();
-  fs.writeFileSync(BOOKINGS_PATH, JSON.stringify(data, null, 2), "utf8");
+  fs.writeFileSync(BOOKINGS_PATH, JSON.stringify(data, null, 2));
 }
 
 function newBookingRef() {
@@ -74,7 +64,7 @@ function newBookingRef() {
 }
 
 /* ======================================================
-   EMAIL TRANSPORT
+   EMAIL
 ====================================================== */
 let mailer = null;
 
@@ -90,42 +80,31 @@ if (process.env.EMAIL_HOST) {
   });
 }
 
-/* ======================================================
-   EMAIL HELPERS
-====================================================== */
 async function sendBookingEmails(booking) {
   if (!mailer) return;
 
-  const subject = `TTTaxis Booking Confirmation – ${booking.id}`;
-
-  const body =
-    `Thank you for booking with TTTaxis.\n\n` +
-    `Booking reference: ${booking.id}\n` +
-    `Pickup: ${booking.pickup}\n` +
-    `Dropoff: ${booking.dropoff}\n` +
-    (booking.pickup_time_iso ? `Date & Time: ${booking.pickup_time_iso}\n` : "") +
-    `Estimated fare: £${booking.price_gbp}\n\n` +
-    `We will contact you shortly to confirm your driver.\n\n` +
-    `TTTaxis`;
-
   try {
-    // Customer email (if provided later)
     if (booking.customer_email) {
       await mailer.sendMail({
         from: process.env.FROM_EMAIL,
         to: booking.customer_email,
-        subject,
-        text: body
+        subject: `TTTaxis Booking Confirmation – ${booking.id}`,
+        text:
+          `Thank you for booking with TTTaxis.\n\n` +
+          `Reference: ${booking.id}\n` +
+          `Pickup: ${booking.pickup}\n` +
+          `Dropoff: ${booking.dropoff}\n` +
+          `Time: ${booking.pickup_time_iso || "ASAP"}\n` +
+          `Fare: £${booking.price_gbp}\n\nTTTaxis`
       });
     }
 
-    // Dispatch email
     await mailer.sendMail({
       from: process.env.FROM_EMAIL,
       to: process.env.DISPATCH_EMAIL,
       subject: `NEW BOOKING – ${booking.id}`,
       text:
-        `New booking received:\n\n` +
+        `New booking received\n\n` +
         `Ref: ${booking.id}\n` +
         `Pickup: ${booking.pickup}\n` +
         `Dropoff: ${booking.dropoff}\n` +
@@ -140,7 +119,7 @@ async function sendBookingEmails(booking) {
 }
 
 /* ======================================================
-   GEOCODING (UK-ONLY + BIAS)
+   GEO (UK ONLY + BIAS)
 ====================================================== */
 async function geocode(place) {
   const url =
@@ -161,7 +140,7 @@ async function geocode(place) {
 }
 
 /* ======================================================
-   DISTANCE + PRICING
+   ROUTING & PRICING
 ====================================================== */
 async function getMiles(pickup, dropoff) {
   const a = await geocode(pickup);
@@ -173,6 +152,7 @@ async function getMiles(pickup, dropoff) {
 
   const res = await fetch(url);
   const data = await res.json();
+
   if (!data.routes?.length) throw new Error("Route not found");
 
   return Math.round((data.routes[0].distance / 1609.34) * 10) / 10;
@@ -186,15 +166,51 @@ function calculateFareGBP(miles, isoTime) {
   return Math.round(price * 100) / 100;
 }
 
+function getFixedRouteFare(pickup, dropoff) {
+  const p = pickup.toLowerCase();
+  const d = dropoff.toLowerCase();
+
+  for (const route of FIXED_ROUTE_FARES) {
+    const from = route.from.toLowerCase();
+    const to = route.to.toLowerCase();
+
+    if (
+      (p.includes(from) && d.includes(to)) ||
+      (p.includes(to) && d.includes(from))
+    ) {
+      return route.price;
+    }
+  }
+  return null;
+}
+
 /* ======================================================
    QUOTE
 ====================================================== */
 app.post("/quote", async (req, res) => {
   try {
     const { pickup, dropoff, pickup_time_iso } = req.body;
+
+    const fixedFare = getFixedRouteFare(pickup, dropoff);
+    if (fixedFare !== null) {
+      let price = fixedFare;
+      if (
+        pickup_time_iso &&
+        new Date(pickup_time_iso).getHours() >= NIGHT_START_HOUR
+      ) {
+        price *= NIGHT_MULTIPLIER;
+      }
+
+      return res.json({
+        fixed: true,
+        price_gbp: Math.round(price * 100) / 100
+      });
+    }
+
     const miles = await getMiles(pickup, dropoff);
     const price = calculateFareGBP(miles, pickup_time_iso);
-    res.json({ miles, price_gbp: price });
+
+    res.json({ fixed: false, miles, price_gbp: price });
   } catch {
     res.status(500).json({ error: "Unable to calculate price" });
   }
@@ -205,10 +221,33 @@ app.post("/quote", async (req, res) => {
 ====================================================== */
 app.post("/book", async (req, res) => {
   try {
-    const { pickup, dropoff, pickup_time_iso, name, phone, notes } = req.body;
+    const {
+      pickup,
+      dropoff,
+      pickup_time_iso,
+      name,
+      phone,
+      email,
+      notes
+    } = req.body;
 
-    const miles = await getMiles(pickup, dropoff);
-    const price = calculateFareGBP(miles, pickup_time_iso);
+    const fixedFare = getFixedRouteFare(pickup, dropoff);
+
+    let miles = null;
+    let price;
+
+    if (fixedFare !== null) {
+      price = fixedFare;
+      if (
+        pickup_time_iso &&
+        new Date(pickup_time_iso).getHours() >= NIGHT_START_HOUR
+      ) {
+        price *= NIGHT_MULTIPLIER;
+      }
+    } else {
+      miles = await getMiles(pickup, dropoff);
+      price = calculateFareGBP(miles, pickup_time_iso);
+    }
 
     const booking = {
       id: newBookingRef(),
@@ -217,9 +256,11 @@ app.post("/book", async (req, res) => {
       dropoff,
       pickup_time_iso: pickup_time_iso || null,
       miles,
-      price_gbp: price,
+      price_gbp: Math.round(price * 100) / 100,
+      fixed_fare: fixedFare !== null,
       customer_name: name,
       customer_phone: phone,
+      customer_email: email || null,
       notes: notes || "",
       status: pickup_time_iso ? "SCHEDULED" : "ASAP"
     };
@@ -238,15 +279,8 @@ app.post("/book", async (req, res) => {
 });
 
 /* ======================================================
-   ADMIN + HEALTH
+   HEALTH
 ====================================================== */
-app.get("/admin/bookings", (req, res) => {
-  if (req.headers["x-admin-token"] !== ADMIN_TOKEN) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  res.json({ bookings: readBookings() });
-});
-
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
@@ -258,3 +292,4 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`TTTaxis backend listening on port ${PORT}`);
 });
+;

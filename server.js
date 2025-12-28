@@ -8,12 +8,17 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 /* =========================
-   MIDDLEWARE
+   CORS — IMPORTANT FIX
 ========================= */
 app.use(cors({
-  origin: "*",
-  methods: ["POST", "GET"]
+  origin: [
+    "https://tttaxis.uk",
+    "https://www.tttaxis.uk"
+  ],
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"]
 }));
+
 app.use(bodyParser.json());
 
 /* =========================
@@ -35,7 +40,7 @@ const mailer = nodemailer.createTransport({
 const MIN_FARE = 4.20;
 const LOCAL_PER_MILE = 2.20;
 
-// Fixed airport fares
+// Fixed airport fares (GBP)
 const FIXED_AIRPORT_FARES = {
   "manchester airport": 120,
   "liverpool airport": 132,
@@ -43,21 +48,21 @@ const FIXED_AIRPORT_FARES = {
 };
 
 /* =========================
-   DISTANCE ESTIMATE
-   (simple placeholder – replace later if needed)
+   DISTANCE FALLBACK
+   (Safe placeholder)
 ========================= */
 function estimateMiles(pickup, dropoff) {
-  return 10; // safe fallback for local journeys
+  return 10; // simple fallback
 }
 
 /* =========================
-   QUOTE
+   QUOTE ENDPOINT
 ========================= */
 app.post("/quote", (req, res) => {
   const { pickup, dropoff } = req.body;
 
   if (!pickup || !dropoff) {
-    return res.status(400).json({ error: "Missing locations" });
+    return res.status(400).json({ error: "Missing pickup or dropoff" });
   }
 
   const dropKey = dropoff.toLowerCase();
@@ -81,7 +86,7 @@ app.post("/quote", (req, res) => {
 });
 
 /* =========================
-   BOOKING + EMAILS
+   BOOKING + EMAIL
 ========================= */
 app.post("/book", async (req, res) => {
   const {
@@ -110,7 +115,7 @@ app.post("/book", async (req, res) => {
   };
 
   try {
-    // CUSTOMER CONFIRMATION
+    // Customer email
     if (email) {
       await mailer.sendMail({
         from: `"TTTaxis" <${process.env.SMTP_USER}>`,
@@ -119,9 +124,52 @@ app.post("/book", async (req, res) => {
         text:
 `Thank you for booking with TTTaxis.
 
-Booking reference: ${booking.id}
+Reference: ${booking.id}
 
 Pickup: ${pickup}
 Dropoff: ${dropoff}
-Time: ${pickup_time_iso || "AS
-;
+Time: ${pickup_time_iso || "ASAP"}
+Price: £${price_gbp}
+
+We will confirm your driver shortly.
+
+TTTaxis
+01539 556160`
+      });
+    }
+
+    // Operator email
+    await mailer.sendMail({
+      from: `"TTTaxis" <${process.env.SMTP_USER}>`,
+      to: process.env.SMTP_USER,
+      subject: "New Taxi Booking Received",
+      text:
+`NEW BOOKING
+
+Reference: ${booking.id}
+Name: ${name}
+Phone: ${phone}
+Email: ${email || "Not provided"}
+
+Pickup: ${pickup}
+Dropoff: ${dropoff}
+Time: ${pickup_time_iso || "ASAP"}
+Price: £${price_gbp}`
+    });
+
+  } catch (err) {
+    console.error("EMAIL ERROR:", err);
+  }
+
+  res.json({
+    success: true,
+    booking
+  });
+});
+
+/* =========================
+   START SERVER
+========================= */
+app.listen(PORT, () => {
+  console.log(`TTTaxis backend listening on port ${PORT}`);
+});

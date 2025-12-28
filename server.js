@@ -1,14 +1,19 @@
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
-import nodemailer from "nodemailer";
 import crypto from "crypto";
+import sgMail from "@sendgrid/mail";
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
 /* =========================
-   CORS — IMPORTANT FIX
+   SENDGRID SETUP
+========================= */
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
+/* =========================
+   MIDDLEWARE
 ========================= */
 app.use(cors({
   origin: [
@@ -22,25 +27,11 @@ app.use(cors({
 app.use(bodyParser.json());
 
 /* =========================
-   EMAIL (GMAIL SMTP)
-========================= */
-const mailer = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  }
-});
-
-/* =========================
    PRICING RULES
 ========================= */
 const MIN_FARE = 4.20;
 const LOCAL_PER_MILE = 2.20;
 
-// Fixed airport fares (GBP)
 const FIXED_AIRPORT_FARES = {
   "manchester airport": 120,
   "liverpool airport": 132,
@@ -49,25 +40,23 @@ const FIXED_AIRPORT_FARES = {
 
 /* =========================
    DISTANCE FALLBACK
-   (Safe placeholder)
 ========================= */
-function estimateMiles(pickup, dropoff) {
-  return 10; // simple fallback
+function estimateMiles() {
+  return 10;
 }
 
 /* =========================
-   QUOTE ENDPOINT
+   QUOTE
 ========================= */
 app.post("/quote", (req, res) => {
   const { pickup, dropoff } = req.body;
 
   if (!pickup || !dropoff) {
-    return res.status(400).json({ error: "Missing pickup or dropoff" });
+    return res.status(400).json({ error: "Missing locations" });
   }
 
   const dropKey = dropoff.toLowerCase();
 
-  // Fixed airport pricing
   if (FIXED_AIRPORT_FARES[dropKey]) {
     return res.json({
       fixed: true,
@@ -75,8 +64,7 @@ app.post("/quote", (req, res) => {
     });
   }
 
-  // Local pricing
-  const miles = estimateMiles(pickup, dropoff);
+  const miles = estimateMiles();
   const price = Math.max(MIN_FARE, miles * LOCAL_PER_MILE);
 
   res.json({
@@ -86,7 +74,7 @@ app.post("/quote", (req, res) => {
 });
 
 /* =========================
-   BOOKING + EMAIL
+   BOOKING + EMAILS
 ========================= */
 app.post("/book", async (req, res) => {
   const {
@@ -99,7 +87,7 @@ app.post("/book", async (req, res) => {
     price_gbp
   } = req.body;
 
-  if (!pickup || !dropoff || !name || !phone || !price_gbp) {
+  if (!pickup || !dropoff || !name || !phone || typeof price_gbp !== "number") {
     return res.status(400).json({ success: false });
   }
 
@@ -115,21 +103,23 @@ app.post("/book", async (req, res) => {
   };
 
   try {
-    // Customer email
+    /* CUSTOMER EMAIL */
     if (email) {
-      await mailer.sendMail({
-        from: `"TTTaxis" <${process.env.SMTP_USER}>`,
+      await sgMail.send({
         to: email,
+        from: process.env.SENDGRID_FROM,
         subject: "Your TTTaxis Booking Confirmation",
         text:
 `Thank you for booking with TTTaxis.
 
-Reference: ${booking.id}
+Booking reference: ${booking.id}
 
 Pickup: ${pickup}
 Dropoff: ${dropoff}
 Time: ${pickup_time_iso || "ASAP"}
 Price: £${price_gbp}
+
+All prices include VAT.
 
 We will confirm your driver shortly.
 
@@ -138,15 +128,16 @@ TTTaxis
       });
     }
 
-    // Operator email
-    await mailer.sendMail({
-      from: `"TTTaxis" <${process.env.SMTP_USER}>`,
-      to: process.env.SMTP_USER,
+    /* OPERATOR EMAIL */
+    await sgMail.send({
+      to: process.env.SENDGRID_FROM,
+      from: process.env.SENDGRID_FROM,
       subject: "New Taxi Booking Received",
       text:
-`NEW BOOKING
+`NEW BOOKING RECEIVED
 
 Reference: ${booking.id}
+
 Name: ${name}
 Phone: ${phone}
 Email: ${email || "Not provided"}
@@ -158,7 +149,7 @@ Price: £${price_gbp}`
     });
 
   } catch (err) {
-    console.error("EMAIL ERROR:", err);
+    console.error("SENDGRID ERROR:", err);
   }
 
   res.json({

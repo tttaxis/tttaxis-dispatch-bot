@@ -26,6 +26,12 @@ app.use((req, res, next) => {
 });
 
 app.options("*", (_, res) => res.sendStatus(200));
+console.log("EMAIL CONFIG CHECK", {
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT,
+  user: process.env.SMTP_USER,
+  hasPass: !!process.env.SMTP_PASS
+});
 
 /* =====================================================
    EMAIL (SMTP)

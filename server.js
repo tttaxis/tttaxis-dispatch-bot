@@ -1,185 +1,112 @@
 import express from "express";
+import cors from "cors";
+import bodyParser from "body-parser";
 import nodemailer from "nodemailer";
+import crypto from "crypto";
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-/* =====================================================
-   BASIC MIDDLEWARE
-===================================================== */
-app.use(express.json());
+/* =========================
+   MIDDLEWARE
+========================= */
+app.use(cors({ origin: "*", methods: ["POST", "GET"] }));
+app.use(bodyParser.json());
 
-/* =====================================================
-   CORS – ALLOW TTTAXIS WEBSITE
-===================================================== */
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (
-    origin === "https://tttaxis.uk" ||
-    origin === "https://www.tttaxis.uk"
-  ) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  }
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  next();
-});
-
-app.options("*", (_, res) => res.sendStatus(200));
-console.log("EMAIL CONFIG CHECK", {
+/* =========================
+   SMTP TEST LOGGING
+========================= */
+console.log("SMTP ENV CHECK", {
   host: process.env.SMTP_HOST,
   port: process.env.SMTP_PORT,
   user: process.env.SMTP_USER,
   hasPass: !!process.env.SMTP_PASS
 });
 
-/* =====================================================
-   EMAIL (SMTP)
-===================================================== */
+/* =========================
+   MAIL TRANSPORT (DEBUG)
+========================= */
 const mailer = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: Number(process.env.EMAIL_PORT),
+  host: "smtp.gmail.com",
+  port: 587,
   secure: false,
   auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  },
+  logger: true,
+  debug: true
 });
 
-/* =====================================================
-   PRICING RULES
-===================================================== */
-const MIN_FARE = 4.20;
-const LOCAL_PRICE_PER_MILE = 2.20;
-const NIGHT_MULTIPLIER = 1.5;
-const NIGHT_START_HOUR = 23;
-
-/* =====================================================
-   FIXED AIRPORT ROUTES (NO NIGHT UPLIFT)
-===================================================== */
-const FIXED_ROUTE_FARES = [
-  { from: "Lancaster", to: "Manchester Airport", price: 90 },
-  { from: "Kendal", to: "Manchester Airport", price: 120 },
-  { from: "Kendal", to: "Leeds Bradford Airport", price: 98 },
-  { from: "Lancaster", to: "Leeds Bradford Airport", price: 111 },
-  { from: "Kendal", to: "Liverpool John Lennon Airport", price: 132 },
-  { from: "Lancaster", to: "Liverpool John Lennon Airport", price: 102 }
-];
-
-function getFixedRouteFare(pickup, dropoff) {
-  const p = pickup.toLowerCase();
-  const d = dropoff.toLowerCase();
-
-  for (const r of FIXED_ROUTE_FARES) {
-    const from = r.from.toLowerCase();
-    const to = r.to.toLowerCase();
-
-    if (
-      (p.includes(from) && d.includes(to)) ||
-      (p.includes(to) && d.includes(from))
-    ) {
-      return r.price;
-    }
-  }
-  return null;
-}
-
-/* =====================================================
-   OPENSTREETMAP ROUTING (NO GOOGLE)
-===================================================== */
-async function getMiles(pickup, dropoff) {
-  async function geocode(place) {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(place + ", UK")}`,
-      { headers: { "User-Agent": "TTTaxis/1.0" } }
-    );
-    const data = await res.json();
-    if (!data[0]) throw new Error("Location not found");
-    return `${data[0].lon},${data[0].lat}`;
-  }
-
-  const from = await geocode(pickup);
-  const to = await geocode(dropoff);
-
-  const routeRes = await fetch(
-    `https://router.project-osrm.org/route/v1/driving/${from};${to}?overview=false`
-  );
-  const routeData = await routeRes.json();
-
-  if (!routeData.routes?.[0]) throw new Error("Route not found");
-
-  return routeData.routes[0].distance / 1609.34;
-}
-
-/* =====================================================
-   LOCAL FARE CALCULATION
-===================================================== */
-function calculateLocalFare(miles, pickup_time_iso) {
-  let price = Math.max(MIN_FARE, miles * LOCAL_PRICE_PER_MILE);
-
-  if (pickup_time_iso) {
-    const hour = new Date(pickup_time_iso).getHours();
-    if (hour >= NIGHT_START_HOUR) {
-      price *= NIGHT_MULTIPLIER;
-    }
-  }
-
-  return Math.round(price * 100) / 100;
-}
-
-/* =====================================================
-   QUOTE ENDPOINT
-===================================================== */
-app.post("/quote", async (req, res) => {
+/* =========================
+   TEST EMAIL ROUTE
+========================= */
+app.get("/test-email", async (req, res) => {
   try {
-    const { pickup, dropoff, pickup_time_iso } = req.body;
+    const info = await mailer.sendMail({
+      from: `"TTTaxis Test" <${process.env.SMTP_USER}>`,
+      to: process.env.SMTP_USER,
+      subject: "TTTaxis SMTP Test",
+      text: "This is a test email from your Railway backend."
+    });
 
-    if (!pickup || !dropoff) {
-      return res.status(400).json({ error: "Missing locations" });
-    }
-
-    const fixedFare = getFixedRouteFare(pickup, dropoff);
-    if (fixedFare !== null) {
-      return res.json({ fixed: true, price_gbp: fixedFare });
-    }
-
-    const miles = await getMiles(pickup, dropoff);
-    const price = calculateLocalFare(miles, pickup_time_iso);
+    console.log("EMAIL SENT", info.messageId);
 
     res.json({
-      fixed: false,
-      miles: Math.round(miles * 10) / 10,
-      price_gbp: price
+      success: true,
+      messageId: info.messageId
     });
+
   } catch (err) {
-    console.error("QUOTE ERROR:", err);
-    res.status(500).json({ error: "Quote failed" });
+    console.error("EMAIL TEST FAILED", err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 });
 
-/* =====================================================
-   BOOK + EMAIL CONFIRMATION
-===================================================== */
-app.post("/book", async (req, res) => {
-  try {
-    const {
-      pickup,
-      dropoff,
-      pickup_time_iso,
-      name,
-      phone,
-      email,
-      price_gbp
-    } = req.body;
+/* =========================
+   QUOTE (KEEP WORKING)
+========================= */
+const MIN_FARE = 4.20;
+const PER_MILE = 2.20;
 
-    if (!pickup || !dropoff || !name || !phone) {
-      return res.status(400).json({ success: false });
-    }
+app.post("/quote", (req, res) => {
+  const { pickup, dropoff } = req.body;
 
-    const bookingId = Math.random()
-      .toString(36)
-      .slice(2, 8)
-      .toUpperCase();
+  if (!pickup || !dropoff) {
+    return res.status(400).json({ error: "Missing locations" });
+  }
 
-    const timeText = pickup_time_i
+  // Dummy miles for test
+  const miles = 10;
+  const price = Math.max(MIN_FARE, miles * PER_MILE);
 
+  res.json({
+    fixed: false,
+    price_gbp: Number(price.toFixed(2))
+  });
+});
+
+/* =========================
+   BOOK (NO EMAIL YET)
+========================= */
+app.post("/book", (req, res) => {
+  const booking = {
+    id: crypto.randomUUID(),
+    ...req.body
+  };
+
+  res.json({
+    success: true,
+    booking
+  });
+});
+
+/* =========================
+   START SERVER
+========================= */
+app.listen(PORT, () => {
+  console.log(`TTTaxis backend listening on port ${PORT}`);
+});

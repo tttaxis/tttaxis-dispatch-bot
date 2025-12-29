@@ -55,8 +55,6 @@ const FIXED_AIRPORT_FARES = {
   "leeds bradford airport": 98
 };
 
-import fetch from "node-fetch";
-
 /* =========================
    UK GEO + DISTANCE
 ========================= */

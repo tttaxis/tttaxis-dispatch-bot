@@ -1,3 +1,4 @@
+
 "dependencies": {
   "express": "^4.18.2",
   "cors": "^2.8.5",
@@ -5,10 +6,4 @@
   "@sendgrid/mail": "^7.7.0",
   "stripe": "^14.0.0"
 }
-app.post("/book", (req, res) => {
-  return res.status(403).json({
-    success: false,
-    error: "Bookings must be completed via Stripe"
-  });
-});
 

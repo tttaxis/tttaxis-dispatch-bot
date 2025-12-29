@@ -55,13 +55,60 @@ const FIXED_AIRPORT_FARES = {
   "leeds bradford airport": 98
 };
 
+import fetch from "node-fetch";
+
 /* =========================
-   DISTANCE FALLBACK
-   (Replace later with real routing)
+   UK GEO + DISTANCE
 ========================= */
-function estimateMiles() {
-  return 10; // placeholder
+
+async function geocodeUK(address) {
+  const url =
+    "https://nominatim.openstreetmap.org/search" +
+    `?q=${encodeURIComponent(address + ", UK")}` +
+    "&format=json&limit=1&countrycodes=gb";
+
+  const res = await fetch(url, {
+    headers: { "User-Agent": "TTTaxis/1.0 (booking@tttaxis.uk)" }
+  });
+
+  const data = await res.json();
+
+  if (!data || !data.length) {
+    throw new Error("Location not found");
+  }
+
+  return {
+    lat: parseFloat(data[0].lat),
+    lon: parseFloat(data[0].lon)
+  };
 }
+
+function haversineMiles(a, b) {
+  const R = 3958.8; // Earth radius in miles
+  const toRad = d => (d * Math.PI) / 180;
+
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+
+  return R * (2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h)));
+}
+
+async function calculateMiles(pickup, dropoff) {
+  const [from, to] = await Promise.all([
+    geocodeUK(pickup),
+    geocodeUK(dropoff)
+  ]);
+
+  return haversineMiles(from, to);
+}
+
 
 /* =========================
    QUOTE

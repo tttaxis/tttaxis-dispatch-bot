@@ -5,6 +5,7 @@ import crypto from "crypto";
 import sgMail from "@sendgrid/mail";
 import Stripe from "stripe";
 
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const PORT = process.env.PORT || 8080;
 

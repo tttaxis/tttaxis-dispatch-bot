@@ -79,6 +79,48 @@ app.post("/quote", (req, res) => {
     price_gbp: Number(price.toFixed(2))
   });
 });
+app.post("/create-checkout-session", async (req, res) => {
+  try {
+    const { price_gbp, payment_option } = req.body;
+
+    if (typeof price_gbp !== "number") {
+      return res.status(400).json({ error: "Invalid price" });
+    }
+
+    const amountPence =
+      payment_option === "deposit"
+        ? 2000 // £20 deposit
+        : Math.round(price_gbp * 100);
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency: "gbp",
+            product_data: {
+              name:
+                payment_option === "deposit"
+                  ? "Taxi booking deposit"
+                  : "Taxi booking payment"
+            },
+            unit_amount: amountPence
+          },
+          quantity: 1
+        }
+      ],
+      success_url: process.env.STRIPE_SUCCESS_URL,
+      cancel_url: process.env.STRIPE_CANCEL_URL
+    });
+
+    res.json({ url: session.url });
+
+  } catch (err) {
+    console.error("STRIPE ERROR:", err);
+    res.status(500).json({ error: "Stripe session failed" });
+  }
+});
 
 /* =========================
    STRIPE CHECKOUT

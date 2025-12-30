@@ -11,6 +11,16 @@ import Stripe from "stripe";
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
+app.use(cors({
+  origin: ["https://tttaxis.uk", "https://www.tttaxis.uk"],
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"]
+}));
+
+app.use(bodyParser.json());
+
 /* =========================
    ENV CHECKS
 ========================= */
@@ -100,10 +110,19 @@ function haversineMiles(a, b) {
 }
 
 async function calculateMiles(pickup, dropoff) {
-  const [from, to] = await Promise.all([
-    geocodeUK(pickup),
-    geocodeUK(dropoff)
-  ]);
+  try {
+    const [from, to] = await Promise.all([
+      geocodeUK(pickup),
+      geocodeUK(dropoff)
+    ]);
+
+    const miles = haversineMiles(from, to);
+    return miles;
+  } catch (err) {
+    console.error("DISTANCE ERROR:", err.message);
+    return null; // IMPORTANT: prevents 500 errors
+  }
+}
 
  /* =========================
    QUOTE

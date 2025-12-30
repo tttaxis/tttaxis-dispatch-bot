@@ -116,13 +116,14 @@ async function calculateMiles(pickup, dropoff) {
       geocodeUK(dropoff)
     ]);
 
-    const miles = haversineMiles(from, to);
-    return miles;
+    return haversineMiles(from, to);
+
   } catch (err) {
-    console.error("DISTANCE ERROR:", err.message);
-    return null; // IMPORTANT: prevents 500 errors
+    console.warn("⚠️ Geocode failed, using fallback mileage:", err.message);
+    return 10; // sensible local fallback miles
   }
 }
+
 
  /* =========================
    QUOTE
@@ -146,9 +147,6 @@ app.post("/quote", async (req, res) => {
 
     const miles = await calculateMiles(pickup, dropoff);
 
-    if (!miles || isNaN(miles)) {
-      return res.status(400).json({
-        error: "Unable to calculate distance"
       });
     }
 

@@ -127,7 +127,7 @@ app.post("/quote", (req, res) => {
       basePrice = FIXED_AIRPORT_FARES[dropKey];
       fixed = true;
     } else {
-      const miles = estimateMiles();
+      const miles = await calculateMiles(pickup, dropoff);
       basePrice = Math.max(MIN_FARE, miles * LOCAL_PER_MILE);
     }
 

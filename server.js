@@ -105,11 +105,7 @@ async function calculateMiles(pickup, dropoff) {
     geocodeUK(dropoff)
   ]);
 
-  return haversineMiles(from, to);
-}
-
-
-/* =========================
+ /* =========================
    QUOTE
 ========================= */
 app.post("/quote", async (req, res) => {
@@ -140,45 +136,14 @@ app.post("/quote", async (req, res) => {
     const base = Math.max(MIN_FARE, miles * LOCAL_PER_MILE);
     const price = Number((base * 1.2).toFixed(2)); // VAT included
 
-    res.json({
+    return res.json({
       fixed: false,
       miles: Number(miles.toFixed(1)),
       price_gbp: price
     });
   } catch (err) {
     console.error("QUOTE ERROR:", err);
-    res.status(500).json({ error: "Quote failed" });
-  }
-});
-
-    const { pickup, dropoff } = req.body;
-
-    if (!pickup || !dropoff) {
-      return res.status(400).json({ error: "Missing locations" });
-    }
-
-    const dropKey = dropoff.toLowerCase().trim();
-    let basePrice;
-    let fixed = false;
-
-    if (FIXED_AIRPORT_FARES[dropKey]) {
-      basePrice = FIXED_AIRPORT_FARES[dropKey];
-      fixed = true;
-    } else {
-      const miles = await calculateMiles(pickup, dropoff);
-      basePrice = Math.max(MIN_FARE, miles * LOCAL_PER_MILE);
-    }
-
-    const priceWithVat = Number((basePrice * (1 + VAT_RATE)).toFixed(2));
-
-    res.json({
-      fixed,
-      price_gbp_inc_vat: priceWithVat
-    });
-
-  } catch (err) {
-    console.error("QUOTE ERROR:", err);
-    res.status(500).json({ error: "Quote failed" });
+    return res.status(500).json({ error: "Quote failed" });
   }
 });
 

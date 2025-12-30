@@ -54,49 +54,7 @@ const FIXED_AIRPORT_FARES = {
   "liverpool airport": 132,
   "leeds bradford airport": 98
 };
-async function calculateMiles(pickup, dropoff) {
-  try {
-    const geo = async (q) => {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-          q + ", UK"
-        )}`,
-        {
-          headers: {
-            "User-Agent": "TTTaxis/1.0 (booking@tttaxis.uk)"
-          }
-        }
-      );
 
-      const data = await res.json();
-      if (!data || !data[0]) throw new Error("No geocode result");
-      return {
-        lat: parseFloat(data[0].lat),
-        lon: parseFloat(data[0].lon)
-      };
-    };
-
-    const a = await geo(pickup);
-    const b = await geo(dropoff);
-
-    const R = 3958.8; // miles
-    const toRad = (x) => (x * Math.PI) / 180;
-
-    const dLat = toRad(b.lat - a.lat);
-    const dLon = toRad(b.lon - a.lon);
-
-    const h =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(toRad(a.lat)) *
-        Math.cos(toRad(b.lat)) *
-        Math.sin(dLon / 2) ** 2;
-
-    return 2 * R * Math.asin(Math.sqrt(h));
-  } catch (err) {
-    console.error("DISTANCE ERROR:", err.message);
-    return null; // IMPORTANT
-  }
-}
 
 /* =========================
    UK GEO + DISTANCE

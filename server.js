@@ -34,12 +34,6 @@ app.post("/quote", (req, res) => {
 });
 
 /* =========================
-   START SERVER
-========================= */
-app.listen(PORT, () => {
-  console.log(`TTTaxis backend listening on port ${PORT}`);
-});
-/* =========================
    MIDDLEWARE
 ========================= */
 app.use(cors({

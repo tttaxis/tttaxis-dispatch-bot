@@ -39,7 +39,6 @@ app.post("/quote", (req, res) => {
 app.listen(PORT, () => {
   console.log(`TTTaxis backend listening on port ${PORT}`);
 });
-import cors from "cors";
 import fetch from "node-fetch";
 
 const app = express();

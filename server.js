@@ -41,8 +41,6 @@ app.listen(PORT, () => {
 });
 import fetch from "node-fetch";
 
-const PORT = process.env.PORT || 8080;
-
 /* =========================
    MIDDLEWARE
 ========================= */

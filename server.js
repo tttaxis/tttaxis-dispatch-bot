@@ -58,50 +58,31 @@ const FIXED_AIRPORT_FARES = [
 async function geocodeUK(address) {
   const url =
     "https://nominatim.openstreetmap.org/search" +
-    `?q=${encodeURIComponent(address + ", UK")}` +
+    `?q=${encodeURIComponent(address + ", United Kingdom")}` +
     "&format=json&limit=1&countrycodes=gb";
 
   const res = await fetch(url, {
-    headers: { "User-Agent": "TTTaxis/1.0 (booking@tttaxis.uk)" }
+    headers: {
+      "User-Agent": "TTTaxis Booking System - terry@tttaxis.uk"
+    }
   });
+
+  if (!res.ok) {
+    throw new Error("Geocoding request failed");
+  }
 
   const data = await res.json();
 
-  if (!data || !data.length) {
-    throw new Error("Location not found");
+  if (!Array.isArray(data) || data.length === 0) {
+    throw new Error("No geocode result");
   }
 
   return {
-    lat: parseFloat(data[0].lat),
-    lon: parseFloat(data[0].lon)
+    lat: Number(data[0].lat),
+    lon: Number(data[0].lon)
   };
 }
 
-function haversineMiles(a, b) {
-  const R = 3958.8;
-  const toRad = d => (d * Math.PI) / 180;
-
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) *
-    Math.sin(dLon / 2) ** 2;
-
-  return R * (2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h)));
-}
-
-async function calculateMiles(pickup, dropoff) {
-  const [from, to] = await Promise.all([
-    geocodeUK(pickup),
-    geocodeUK(dropoff)
-  ]);
-  return haversineMiles(from, to);
-}
 
 /* =========================
    QUOTE ROUTE
@@ -150,9 +131,10 @@ app.post("/quote", async (req, res) => {
 
   } catch (err) {
     console.error("QUOTE ERROR:", err.message);
-    return res.status(400).json({
-      error: "Unable to calculate distance"
-    });
+    res.status(422).json({
+  error: "Unable to calculate distance"
+});
+
   }
 });
 

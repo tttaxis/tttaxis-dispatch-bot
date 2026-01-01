@@ -39,8 +39,6 @@ app.post("/quote", (req, res) => {
 app.listen(PORT, () => {
   console.log(`TTTaxis backend listening on port ${PORT}`);
 });
-import fetch from "node-fetch";
-
 /* =========================
    MIDDLEWARE
 ========================= */

@@ -23,7 +23,7 @@ app.use(
 );
 
 /* =========================
-   SENDGRID (OPTIONAL)
+   SENDGRID SETUP
 ========================= */
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -157,7 +157,7 @@ function signQuote(payload) {
 }
 
 /* =========================
-   DEFERRED DATABASE (CRITICAL FIX)
+   DEFERRED DATABASE
 ========================= */
 let pool = null;
 
@@ -181,7 +181,7 @@ async function initDatabase() {
 }
 
 async function findAvailableDriver(startIso, endIso) {
-  if (!pool) throw new Error("Database not initialised");
+  if (!pool) return null;
 
   const { rows } = await pool.query(
     `
@@ -210,6 +210,7 @@ app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+/* ---------- QUOTE ---------- */
 app.post("/quote", async (req, res) => {
   try {
     const { pickup, dropoff } = req.body;
@@ -242,6 +243,7 @@ app.post("/quote", async (req, res) => {
   }
 });
 
+/* ---------- BOOK ---------- */
 app.post("/book", async (req, res) => {
   try {
     const {
@@ -276,7 +278,6 @@ app.post("/book", async (req, res) => {
     }
 
     let driverId = null;
-
     if (pool) {
       const start = new Date(pickup_time_iso);
       const end = new Date(start.getTime() + duration_minutes * 60000);
@@ -285,16 +286,40 @@ app.post("/book", async (req, res) => {
 
     const bookingId = crypto.randomUUID();
 
+    /* ===== CUSTOMER EMAIL ===== */
     if (email && process.env.SENDGRID_API_KEY) {
       await sgMail.send({
         to: email,
         from: process.env.SENDGRID_FROM,
-        subject: "TTTaxis Booking Confirmation",
+        subject: "Your TTTaxis Booking Confirmation",
         text:
-          "Reference: " + bookingId +
-          "\nPickup: " + pickup +
-          "\nDropoff: " + dropoff +
-          "\nPrice: £" + recalculated.price
+          "Thank you for booking with TTTaxis.\n\n" +
+          "Booking Reference: " + bookingId + "\n" +
+          "Pickup: " + pickup + "\n" +
+          "Dropoff: " + dropoff + "\n" +
+          "Pickup Time: " + pickup_time_iso + "\n" +
+          "Price: £" + recalculated.price + "\n\n" +
+          "All prices include VAT.\n\n" +
+          "TTTaxis\n01539 556160"
+      });
+    }
+
+    /* ===== OPERATOR EMAIL ===== */
+    if (process.env.SENDGRID_API_KEY && process.env.OPERATOR_EMAIL) {
+      await sgMail.send({
+        to: process.env.OPERATOR_EMAIL,
+        from: process.env.SENDGRID_FROM,
+        subject: "New TTTaxis Booking Received",
+        text:
+          "NEW BOOKING\n\n" +
+          "Reference: " + bookingId + "\n\n" +
+          "Name: " + name + "\n" +
+          "Phone: " + phone + "\n" +
+          "Email: " + (email || "Not provided") + "\n\n" +
+          "Pickup: " + pickup + "\n" +
+          "Dropoff: " + dropoff + "\n" +
+          "Pickup Time: " + pickup_time_iso + "\n\n" +
+          "Price: £" + recalculated.price
       });
     }
 
@@ -318,4 +343,3 @@ app.listen(PORT, async () => {
   await initDatabase();
   console.log("TTTaxis backend running on port " + PORT);
 });
-

@@ -3,20 +3,31 @@ import cors from "cors";
 import crypto from "crypto";
 import axios from "axios";
 import sgMail from "@sendgrid/mail";
+import pkg from "pg";
+
+const { Pool } = pkg;
 
 /* =========================
-   APP SETUP
+   APP + DB SETUP
 ========================= */
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("localhost")
+    ? false
+    : { rejectUnauthorized: false }
+});
+
 /* =========================
    ENV CHECKS
 ========================= */
+if (!process.env.DATABASE_URL) console.error("DATABASE_URL missing");
 if (!process.env.ORS_API_KEY) console.error("ORS_API_KEY missing");
+if (!process.env.QUOTE_SECRET) console.error("QUOTE_SECRET missing");
 if (!process.env.SENDGRID_API_KEY) console.error("SENDGRID_API_KEY missing");
 if (!process.env.SENDGRID_FROM) console.error("SENDGRID_FROM missing");
-if (!process.env.QUOTE_SECRET) console.error("QUOTE_SECRET missing");
 
 /* =========================
    SENDGRID
@@ -28,11 +39,11 @@ if (process.env.SENDGRID_API_KEY) {
 /* =========================
    MIDDLEWARE
 ========================= */
-app.use(express.json());
+app.use(express.json({ limit: "256kb" }));
 app.use(
   cors({
     origin: ["https://tttaxis.uk", "https://www.tttaxis.uk"],
-    methods: ["POST"],
+    methods: ["POST", "GET"],
     allowedHeaders: ["Content-Type"]
   })
 );
@@ -51,7 +62,7 @@ const FIXED_AIRPORT_FARES = [
 ];
 
 /* =========================
-   GEO (UK ONLY)
+   GEO + ROUTING
 ========================= */
 async function geocodeUK(address) {
   const url =
@@ -64,7 +75,7 @@ async function geocodeUK(address) {
     headers: { "User-Agent": "TTTaxis Booking System" }
   });
 
-  if (!res.data || !res.data.length) {
+  if (!res.data?.length) {
     throw new Error("Geocode failed");
   }
 
@@ -74,9 +85,6 @@ async function geocodeUK(address) {
   };
 }
 
-/* =========================
-   ROUTING + FALLBACK
-========================= */
 async function routeMilesORS(from, to) {
   const res = await axios.post(
     "https://api.openrouteservice.org/v2/directions/driving-car",
@@ -94,9 +102,8 @@ async function routeMilesORS(from, to) {
     }
   );
 
-  const meters =
-    res.data.features[0].properties.summary.distance;
-
+  const meters = res.data?.features?.[0]?.properties?.summary?.distance;
+  if (!meters) throw new Error("ORS failed");
   return meters / 1609.344;
 }
 
@@ -117,11 +124,10 @@ async function calculateMiles(pickup, dropoff) {
   const to = await geocodeUK(dropoff);
 
   try {
-    const miles = await routeMilesORS(from, to);
-    if (Number.isFinite(miles)) return miles;
-  } catch {}
-
-  return haversineMiles(from.lat, from.lon, to.lat, to.lon) * 1.25;
+    return await routeMilesORS(from, to);
+  } catch {
+    return haversineMiles(from.lat, from.lon, to.lat, to.lon) * 1.25;
+  }
 }
 
 /* =========================
@@ -151,17 +157,41 @@ async function calculatePrice(pickup, dropoff) {
 }
 
 /* =========================
-   SIGNED QUOTE TOKEN
+   QUOTE SIGNING
 ========================= */
-function signQuote(data) {
+function signQuote(payload) {
   return crypto
     .createHmac("sha256", process.env.QUOTE_SECRET)
-    .update(JSON.stringify(data))
+    .update(JSON.stringify(payload))
     .digest("hex");
 }
 
 /* =========================
-   QUOTE ROUTE (LOCKED)
+   AVAILABILITY CHECK
+========================= */
+async function findAvailableDriver(startIso, endIso) {
+  const { rows } = await pool.query(
+    `
+    SELECT d.id
+    FROM drivers d
+    WHERE d.is_active = true
+    AND NOT EXISTS (
+      SELECT 1 FROM calendar_events e
+      WHERE e.driver_id = d.id
+        AND $1 < e.end_ts
+        AND $2 > e.start_ts
+    )
+    ORDER BY d.id
+    LIMIT 1
+    `,
+    [startIso, endIso]
+  );
+
+  return rows[0]?.id || null;
+}
+
+/* =========================
+   QUOTE ROUTE
 ========================= */
 app.post("/quote", async (req, res) => {
   try {
@@ -172,24 +202,22 @@ app.post("/quote", async (req, res) => {
 
     const result = await calculatePrice(pickup, dropoff);
 
-    const quotePayload = {
+    const payload = {
       pickup,
       dropoff,
-      price_gbp_inc_vat: result.price,
       fixed: result.fixed,
-      miles: result.miles
+      miles: result.miles,
+      price_gbp_inc_vat: result.price
     };
 
-    const quote_signature = signQuote(quotePayload);
+    const quote_signature = signQuote(payload);
 
     res.json({
-      ...quotePayload,
+      ...payload,
       vat_rate: VAT_RATE,
       currency: "GBP",
-      quote_signature,
-      note: "Price locked for booking"
+      quote_signature
     });
-
   } catch (err) {
     console.error(err.message);
     res.status(422).json({ error: "Unable to calculate quote" });
@@ -197,13 +225,16 @@ app.post("/quote", async (req, res) => {
 });
 
 /* =========================
-   BOOK ROUTE (VALIDATED)
+   BOOK ROUTE (LOCKED + CALENDAR)
 ========================= */
 app.post("/book", async (req, res) => {
+  const client = await pool.connect();
   try {
     const {
       pickup,
       dropoff,
+      pickup_time_iso,
+      duration_minutes = 60,
       name,
       phone,
       email,
@@ -211,43 +242,51 @@ app.post("/book", async (req, res) => {
       quote_signature
     } = req.body;
 
-    if (!pickup || !dropoff || !name || !phone || !quote_signature) {
+    if (!pickup || !dropoff || !pickup_time_iso || !name || !phone || !quote_signature) {
       return res.status(400).json({ success: false });
     }
 
-    // Recalculate price
-    const result = await calculatePrice(pickup, dropoff);
+    const recalculated = await calculatePrice(pickup, dropoff);
 
     const verifyPayload = {
       pickup,
       dropoff,
-      price_gbp_inc_vat: result.price,
-      fixed: result.fixed,
-      miles: result.miles
+      fixed: recalculated.fixed,
+      miles: recalculated.miles,
+      price_gbp_inc_vat: recalculated.price
     };
-
-    const expectedSignature = signQuote(verifyPayload);
 
     if (
-      expectedSignature !== quote_signature ||
-      Number(price_gbp_inc_vat) !== result.price
+      signQuote(verifyPayload) !== quote_signature ||
+      Number(price_gbp_inc_vat) !== recalculated.price
     ) {
-      return res.status(403).json({
-        success: false,
-        error: "Price validation failed"
-      });
+      return res.status(403).json({ success: false, error: "Price tampering detected" });
     }
 
-    const booking = {
-      id: crypto.randomUUID(),
-      pickup,
-      dropoff,
-      name,
-      phone,
-      email: email || null,
-      price_gbp_inc_vat: result.price,
-      created_at: new Date().toISOString()
-    };
+    const start = new Date(pickup_time_iso);
+    const end = new Date(start.getTime() + duration_minutes * 60000);
+
+    await client.query("BEGIN");
+
+    const driverId = await findAvailableDriver(start.toISOString(), end.toISOString());
+    if (!driverId) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ success: false, error: "No driver available" });
+    }
+
+    const bookingId = crypto.randomUUID();
+
+    await client.query(
+      `
+      INSERT INTO calendar_events
+        (id, driver_id, start_ts, end_ts, type, source, reference)
+      VALUES
+        ($1, $2, $3, $4, 'booking', 'internal', $5)
+      `,
+      [crypto.randomUUID(), driverId, start, end, bookingId]
+    );
+
+    await client.query("COMMIT");
 
     if (email && process.env.SENDGRID_API_KEY) {
       await sgMail.send({
@@ -255,24 +294,33 @@ app.post("/book", async (req, res) => {
         from: process.env.SENDGRID_FROM,
         subject: "TTTaxis Booking Confirmation",
         text:
-          "Reference: " + booking.id +
+          "Reference: " + bookingId +
           "\nPickup: " + pickup +
           "\nDropoff: " + dropoff +
-          "\nPrice: £" + booking.price_gbp_inc_vat
+          "\nTime: " + pickup_time_iso +
+          "\nPrice: £" + recalculated.price
       });
     }
 
-    res.json({ success: true, booking });
+    res.json({
+      success: true,
+      booking_id: bookingId,
+      driver_id: driverId,
+      price_gbp_inc_vat: recalculated.price
+    });
 
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error(err.message);
     res.status(500).json({ success: false });
+  } finally {
+    client.release();
   }
 });
 
 /* =========================
-   START
+   START SERVER
 ========================= */
 app.listen(PORT, () => {
-  console.log("TTTaxis backend running on port " + PORT);
+  console.log("TTTaxis backend with availability running on port " + PORT);
 });

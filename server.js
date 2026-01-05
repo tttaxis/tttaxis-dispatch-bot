@@ -10,6 +10,18 @@ import sgMail from "@sendgrid/mail";
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+/* =========================
+   SQUARE WEBHOOK RAW BODY
+   (MUST BE FIRST)
+========================= */
+app.use(
+  "/square/webhook",
+  express.raw({ type: "application/json" })
+);
+
+/* =========================
+   GENERAL MIDDLEWARE
+========================= */
 app.use(express.json({ limit: "256kb" }));
 app.use(
   cors({
@@ -20,7 +32,7 @@ app.use(
 );
 
 /* =========================
-   SENDGRID SETUP
+   SENDGRID
 ========================= */
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -180,8 +192,19 @@ async function squareRequest(path, body) {
 
   const data = await res.json();
   if (!res.ok) throw new Error("Square API error");
-
   return data;
+}
+
+/* =========================
+   SQUARE WEBHOOK VERIFY
+========================= */
+function verifySquareSignature(rawBody, signature) {
+  const hmac = crypto
+    .createHmac("sha1", process.env.SQUARE_WEBHOOK_SIGNATURE_KEY)
+    .update(rawBody)
+    .digest("base64");
+
+  return hmac === signature;
 }
 
 /* =========================
@@ -275,18 +298,45 @@ app.post("/create-payment", async (req, res) => {
   }
 });
 
-/* =========================
-   START SERVER
-========================= */
-app.listen(PORT, async () => {
-  await initDatabase();
-  console.log("TTTaxis backend running on port " + PORT);
-});
+/* ---------- SQUARE WEBHOOK ---------- */
+app.post("/square/webhook", async (req, res) => {
+  try {
+    const signature = req.headers["x-square-hmacsha256-signature"];
+    const rawBody = req.body.toString("utf8");
 
+    if (!signature || !verifySquareSignature(rawBody, signature)) {
+      return res.status(401).send("Invalid signature");
+    }
 
+    const event = JSON.parse(rawBody);
+
+    if (event.type !== "payment.updated") {
+      return res.status(200).send("Ignored");
+    }
+
+    const payment = event.data.object.payment;
+
+    if (payment.status !== "COMPLETED") {
+      return res.status(200).send("Not completed");
+    }
+
+    const amountPaid = payment.amount_money.amount / 100;
+
+    console.log("Square payment confirmed:", amountPaid);
+
+    if (process.env.SENDGRID_API_KEY) {
+      await sgMail.send({
+        to: process.env.OPERATOR_EMAIL,
+        from: process.env.SENDGRID_FROM,
+        subject: "Square Payment Confirmed",
+        text: `Payment received: £${amountPaid}`
+      });
+    }
+
+    res.status(200).send("OK");
   } catch (err) {
     console.error(err.message);
-    res.status(500).json({ success: false });
+    res.status(500).send("Webhook error");
   }
 });
 

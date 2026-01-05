@@ -10,9 +10,6 @@ import sgMail from "@sendgrid/mail";
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-/* =========================
-   MIDDLEWARE
-========================= */
 app.use(express.json({ limit: "256kb" }));
 app.use(
   cors({
@@ -46,20 +43,20 @@ const FIXED_AIRPORT_FARES = [
    GEO + ROUTING
 ========================= */
 async function geocodeUK(address) {
-  const url =
-    "https://nominatim.openstreetmap.org/search" +
-    "?q=" +
-    encodeURIComponent(address + ", United Kingdom") +
-    "&format=json&limit=1&countrycodes=gb";
+  const res = await axios.get(
+    "https://nominatim.openstreetmap.org/search",
+    {
+      params: {
+        q: address + ", United Kingdom",
+        format: "json",
+        limit: 1,
+        countrycodes: "gb"
+      },
+      headers: { "User-Agent": "TTTaxis Booking System" }
+    }
+  );
 
-  const res = await axios.get(url, {
-    headers: { "User-Agent": "TTTaxis Booking System" },
-    timeout: 10000
-  });
-
-  if (!res.data?.length) {
-    throw new Error("Geocode failed");
-  }
+  if (!res.data?.length) throw new Error("Geocode failed");
 
   return {
     lat: Number(res.data[0].lat),
@@ -67,54 +64,40 @@ async function geocodeUK(address) {
   };
 }
 
-async function routeMilesORS(from, to) {
-  const res = await axios.post(
-    "https://api.openrouteservice.org/v2/directions/driving-car",
-    {
-      coordinates: [
-        [from.lon, from.lat],
-        [to.lon, to.lat]
-      ]
-    },
-    {
-      headers: {
-        Authorization: process.env.ORS_API_KEY,
-        "Content-Type": "application/json"
-      },
-      timeout: 15000
-    }
-  );
-
-  const meters =
-    res.data?.features?.[0]?.properties?.summary?.distance;
-
-  if (!meters) throw new Error("ORS failed");
-
-  return meters / 1609.344;
-}
-
-function haversineMiles(lat1, lon1, lat2, lon2) {
-  const R = 3958.8;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) *
-    Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) ** 2;
-
-  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-}
-
 async function calculateMiles(pickup, dropoff) {
   const from = await geocodeUK(pickup);
   const to = await geocodeUK(dropoff);
 
   try {
-    return await routeMilesORS(from, to);
+    const res = await axios.post(
+      "https://api.openrouteservice.org/v2/directions/driving-car",
+      {
+        coordinates: [
+          [from.lon, from.lat],
+          [to.lon, to.lat]
+        ]
+      },
+      {
+        headers: {
+          Authorization: process.env.ORS_API_KEY,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    return res.data.features[0].properties.summary.distance / 1609.344;
   } catch {
-    return haversineMiles(from.lat, from.lon, to.lat, to.lon) * 1.25;
+    const R = 3958.8;
+    const dLat = (to.lat - from.lat) * Math.PI / 180;
+    const dLon = (to.lon - from.lon) * Math.PI / 180;
+
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(from.lat * Math.PI / 180) *
+      Math.cos(to.lat * Math.PI / 180) *
+      Math.sin(dLon / 2) ** 2;
+
+    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))) * 1.25;
   }
 }
 
@@ -168,39 +151,37 @@ async function initDatabase() {
   }
 
   const { Pool } = await import("pg");
-
   pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL.includes("localhost")
-      ? false
-      : { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false }
   });
 
   await pool.query("select 1");
   console.log("Postgres connected");
 }
 
-async function findAvailableDriver(startIso, endIso) {
-  if (!pool) return null;
+/* =========================
+   SQUARE SETUP
+========================= */
+const SQUARE_API_BASE =
+  process.env.SQUARE_ENV === "production"
+    ? "https://connect.squareup.com"
+    : "https://connect.squareupsandbox.com";
 
-  const { rows } = await pool.query(
-    `
-    SELECT d.id
-    FROM drivers d
-    WHERE d.is_active = true
-    AND NOT EXISTS (
-      SELECT 1 FROM calendar_events e
-      WHERE e.driver_id = d.id
-        AND $1 < e.end_ts
-        AND $2 > e.start_ts
-    )
-    ORDER BY d.id
-    LIMIT 1
-    `,
-    [startIso, endIso]
-  );
+async function squareRequest(path, body) {
+  const res = await fetch(SQUARE_API_BASE + path, {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer " + process.env.SQUARE_ACCESS_TOKEN,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
 
-  return rows[0]?.id || null;
+  const data = await res.json();
+  if (!res.ok) throw new Error("Square API error");
+
+  return data;
 }
 
 /* =========================
@@ -214,10 +195,6 @@ app.get("/health", (req, res) => {
 app.post("/quote", async (req, res) => {
   try {
     const { pickup, dropoff } = req.body;
-    if (!pickup || !dropoff) {
-      return res.status(400).json({ error: "Missing locations" });
-    }
-
     const result = await calculatePrice(pickup, dropoff);
 
     const payload = {
@@ -228,107 +205,84 @@ app.post("/quote", async (req, res) => {
       price_gbp_inc_vat: result.price
     };
 
-    const quote_signature = signQuote(payload);
-
     res.json({
       ...payload,
-      vat_rate: VAT_RATE,
-      currency: "GBP",
-      quote_signature
+      quote_signature: signQuote(payload),
+      payment_rules: {
+        pay_driver: result.price <= 15,
+        deposit_available: result.price > 15,
+        deposit_amount: Number((result.price * 0.1).toFixed(2)),
+        full_amount: result.price
+      }
     });
-
-  } catch (err) {
-    console.error(err.message);
+  } catch {
     res.status(422).json({ error: "Unable to calculate quote" });
   }
 });
 
-/* ---------- BOOK ---------- */
-app.post("/book", async (req, res) => {
+/* ---------- CREATE SQUARE PAYMENT ---------- */
+app.post("/create-payment", async (req, res) => {
   try {
     const {
+      booking_id,
       pickup,
       dropoff,
-      pickup_time_iso,
-      duration_minutes = 60,
-      name,
-      phone,
-      email,
       price_gbp_inc_vat,
-      quote_signature
+      payment_type,
+      email
     } = req.body;
 
-    if (!pickup || !dropoff || !pickup_time_iso || !name || !phone) {
-      return res.status(400).json({ success: false });
+    if (price_gbp_inc_vat <= 15) {
+      return res.json({ payment_mode: "pay_driver" });
     }
 
-    const recalculated = await calculatePrice(pickup, dropoff);
+    const amount =
+      payment_type === "deposit"
+        ? Number((price_gbp_inc_vat * 0.1).toFixed(2))
+        : price_gbp_inc_vat;
 
-    if (
-      quote_signature &&
-      signQuote({
-        pickup,
-        dropoff,
-        fixed: recalculated.fixed,
-        miles: recalculated.miles,
-        price_gbp_inc_vat: recalculated.price
-      }) !== quote_signature
-    ) {
-      return res.status(403).json({ success: false, error: "Price tampering" });
-    }
-
-    let driverId = null;
-    if (pool) {
-      const start = new Date(pickup_time_iso);
-      const end = new Date(start.getTime() + duration_minutes * 60000);
-      driverId = await findAvailableDriver(start.toISOString(), end.toISOString());
-    }
-
-    const bookingId = crypto.randomUUID();
-
-    /* ===== CUSTOMER EMAIL ===== */
-    if (email && process.env.SENDGRID_API_KEY) {
-      await sgMail.send({
-        to: email,
-        from: process.env.SENDGRID_FROM,
-        subject: "Your TTTaxis Booking Confirmation",
-        text:
-          "Thank you for booking with TTTaxis.\n\n" +
-          "Booking Reference: " + bookingId + "\n" +
-          "Pickup: " + pickup + "\n" +
-          "Dropoff: " + dropoff + "\n" +
-          "Pickup Time: " + pickup_time_iso + "\n" +
-          "Price: £" + recalculated.price + "\n\n" +
-          "All prices include VAT.\n\n" +
-          "TTTaxis\n01539 556160"
-      });
-    }
-
-    /* ===== OPERATOR EMAIL ===== */
-    if (process.env.SENDGRID_API_KEY && process.env.OPERATOR_EMAIL) {
-      await sgMail.send({
-        to: process.env.OPERATOR_EMAIL,
-        from: process.env.SENDGRID_FROM,
-        subject: "New TTTaxis Booking Received",
-        text:
-          "NEW BOOKING\n\n" +
-          "Reference: " + bookingId + "\n\n" +
-          "Name: " + name + "\n" +
-          "Phone: " + phone + "\n" +
-          "Email: " + (email || "Not provided") + "\n\n" +
-          "Pickup: " + pickup + "\n" +
-          "Dropoff: " + dropoff + "\n" +
-          "Pickup Time: " + pickup_time_iso + "\n\n" +
-          "Price: £" + recalculated.price
-      });
-    }
+    const checkout = await squareRequest(
+      "/v2/online-checkout/payment-links",
+      {
+        idempotency_key: crypto.randomUUID(),
+        quick_pay: {
+          name:
+            payment_type === "deposit"
+              ? "TTTaxis Booking Deposit"
+              : "TTTaxis Booking Payment",
+          price_money: {
+            amount: Math.round(amount * 100),
+            currency: "GBP"
+          },
+          location_id: process.env.SQUARE_LOCATION_ID
+        },
+        checkout_options: {
+          redirect_url: "https://tttaxis.uk/booking-confirmed"
+        },
+        pre_populated_data: {
+          buyer_email: email
+        },
+        note: `Booking ${booking_id} | ${pickup} → ${dropoff}`
+      }
+    );
 
     res.json({
-      success: true,
-      booking_id: bookingId,
-      driver_id: driverId,
-      price_gbp_inc_vat: recalculated.price
+      checkout_url: checkout.payment_link.url,
+      amount_charged: amount
     });
+  } catch {
+    res.status(500).json({ error: "Unable to create payment" });
+  }
+});
+
+/* =========================
+   START SERVER
+========================= */
+app.listen(PORT, async () => {
+  await initDatabase();
+  console.log("TTTaxis backend running on port " + PORT);
+});
+
 
   } catch (err) {
     console.error(err.message);

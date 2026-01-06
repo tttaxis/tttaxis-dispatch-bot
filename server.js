@@ -11,8 +11,7 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 /* =========================
-   SQUARE WEBHOOK RAW BODY
-   (MUST BE FIRST)
+   RAW BODY (Square Webhook)
 ========================= */
 app.use(
   "/square/webhook",
@@ -34,7 +33,9 @@ app.use(
 /* =========================
    SENDGRID
 ========================= */
-if (process.env.SENDGRID_API_KEY) {
+if (!process.env.SENDGRID_API_KEY) {
+  console.warn("SENDGRID_API_KEY not set");
+} else {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 }
 
@@ -68,7 +69,9 @@ async function geocodeUK(address) {
     }
   );
 
-  if (!res.data?.length) throw new Error("Geocode failed");
+  if (!res.data?.length) {
+    throw new Error("Geocoding failed");
+  }
 
   return {
     lat: Number(res.data[0].lat),
@@ -99,6 +102,7 @@ async function calculateMiles(pickup, dropoff) {
 
     return res.data.features[0].properties.summary.distance / 1609.344;
   } catch {
+    // Fallback (Haversine + buffer)
     const R = 3958.8;
     const dLat = (to.lat - from.lat) * Math.PI / 180;
     const dLon = (to.lon - from.lon) * Math.PI / 180;
@@ -141,38 +145,6 @@ async function calculatePrice(pickup, dropoff) {
 }
 
 /* =========================
-   PRICE LOCKING
-========================= */
-function signQuote(payload) {
-  if (!process.env.QUOTE_SECRET) return null;
-  return crypto
-    .createHmac("sha256", process.env.QUOTE_SECRET)
-    .update(JSON.stringify(payload))
-    .digest("hex");
-}
-
-/* =========================
-   DEFERRED DATABASE
-========================= */
-let pool = null;
-
-async function initDatabase() {
-  if (!process.env.DATABASE_URL) {
-    console.warn("DATABASE_URL not set – availability disabled");
-    return;
-  }
-
-  const { Pool } = await import("pg");
-  pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-  });
-
-  await pool.query("select 1");
-  console.log("Postgres connected");
-}
-
-/* =========================
    SQUARE SETUP
 ========================= */
 const SQUARE_API_BASE =
@@ -191,8 +163,50 @@ async function squareRequest(path, body) {
   });
 
   const data = await res.json();
-  if (!res.ok) throw new Error("Square API error");
+  if (!res.ok) {
+    console.error("Square API error:", data);
+    throw new Error("Square API error");
+  }
   return data;
+}
+
+/* =========================
+   EMAIL HELPER
+========================= */
+async function sendBookingEmails({ email, bookingRef, amountPaid }) {
+  const customerEmail = {
+    to: email,
+    from: process.env.SENDGRID_FROM,
+    subject: "Your TTTaxis Booking Confirmation",
+    text:
+`Thank you for booking with TTTaxis.
+
+Booking reference: ${bookingRef}
+Amount paid: £${amountPaid}
+
+If you paid a deposit, the remaining balance is payable directly to the driver.
+
+If you have any questions, call us on 01539 556160.
+
+TTTaxis`
+  };
+
+  const operatorEmail = {
+    to: process.env.OPERATOR_EMAIL,
+    from: process.env.SENDGRID_FROM,
+    subject: "New TTTaxis Booking Confirmed",
+    text:
+`A booking has been confirmed.
+
+Reference: ${bookingRef}
+Customer email: ${email}
+Amount paid: £${amountPaid}
+
+Check Square dashboard for full details.`
+  };
+
+  await sgMail.send(customerEmail);
+  await sgMail.send(operatorEmail);
 }
 
 /* =========================
@@ -218,19 +232,17 @@ app.get("/health", (req, res) => {
 app.post("/quote", async (req, res) => {
   try {
     const { pickup, dropoff } = req.body;
+
+    if (!pickup || !dropoff) {
+      return res.status(400).json({ error: "Missing locations" });
+    }
+
     const result = await calculatePrice(pickup, dropoff);
 
-    const payload = {
-      pickup,
-      dropoff,
+    res.json({
       fixed: result.fixed,
       miles: result.miles,
-      price_gbp_inc_vat: result.price
-    };
-
-    res.json({
-      ...payload,
-      quote_signature: signQuote(payload),
+      price_gbp_inc_vat: result.price,
       payment_rules: {
         pay_driver: result.price <= 15,
         deposit_available: result.price > 15,
@@ -238,12 +250,13 @@ app.post("/quote", async (req, res) => {
         full_amount: result.price
       }
     });
-  } catch {
+  } catch (err) {
+    console.error(err.message);
     res.status(422).json({ error: "Unable to calculate quote" });
   }
 });
 
-/* ---------- CREATE SQUARE PAYMENT ---------- */
+/* ---------- CREATE PAYMENT ---------- */
 app.post("/create-payment", async (req, res) => {
   try {
     const {
@@ -254,6 +267,10 @@ app.post("/create-payment", async (req, res) => {
       payment_type,
       email
     } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
 
     if (price_gbp_inc_vat <= 15) {
       return res.json({ payment_mode: "pay_driver" });
@@ -293,7 +310,8 @@ app.post("/create-payment", async (req, res) => {
       checkout_url: checkout.payment_link.url,
       amount_charged: amount
     });
-  } catch {
+  } catch (err) {
+    console.error(err.message);
     res.status(500).json({ error: "Unable to create payment" });
   }
 });
@@ -321,15 +339,14 @@ app.post("/square/webhook", async (req, res) => {
     }
 
     const amountPaid = payment.amount_money.amount / 100;
+    const bookingRef = payment.note || "TTTAXIS";
+    const customerEmail = payment.buyer_email_address;
 
-    console.log("Square payment confirmed:", amountPaid);
-
-    if (process.env.SENDGRID_API_KEY) {
-      await sgMail.send({
-        to: process.env.OPERATOR_EMAIL,
-        from: process.env.SENDGRID_FROM,
-        subject: "Square Payment Confirmed",
-        text: `Payment received: £${amountPaid}`
+    if (customerEmail) {
+      await sendBookingEmails({
+        email: customerEmail,
+        bookingRef,
+        amountPaid
       });
     }
 
@@ -343,7 +360,6 @@ app.post("/square/webhook", async (req, res) => {
 /* =========================
    START SERVER
 ========================= */
-app.listen(PORT, async () => {
-  await initDatabase();
+app.listen(PORT, () => {
   console.log("TTTaxis backend running on port " + PORT);
 });

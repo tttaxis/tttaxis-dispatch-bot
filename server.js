@@ -167,14 +167,22 @@ async function squareRequest(path, body) {
 }
 
 /* =========================
-   EMAIL HELPER (WITH SAFETY NET)
+   EMAIL HELPER (FULL DETAILS)
 ========================= */
-async function sendBookingEmails({ email, bookingRef, amountPaid }) {
-  console.log("SENDGRID: preparing booking emails", {
+async function sendBookingEmails(booking) {
+  const {
     email,
     bookingRef,
-    amountPaid
-  });
+    amountPaid,
+    name,
+    phone,
+    pickup,
+    dropoff,
+    pickupTime,
+    additionalInfo
+  } = booking;
+
+  const notes = additionalInfo || "None provided";
 
   const customerEmail = {
     to: email,
@@ -183,39 +191,63 @@ async function sendBookingEmails({ email, bookingRef, amountPaid }) {
     text:
 `Thank you for booking with TTTaxis.
 
-Booking reference: ${bookingRef}
-Amount paid: £${amountPaid}
+Booking reference:
+${bookingRef}
 
-If you paid a deposit, the remaining balance is payable directly to the driver.
+Pickup:
+${pickup}
 
-If you have any questions, call us on 01539 556160.
+Drop-off:
+${dropoff}
 
-TTTaxis`
+Pickup date & time:
+${pickupTime}
+
+Payment received:
+£${amountPaid}
+
+Additional information:
+${notes}
+
+If you paid a deposit, the remaining balance is payable to the driver.
+
+TTTaxis
+01539 556160`
   };
 
   const operatorEmail = {
     to: process.env.OPERATOR_EMAIL,
     from: process.env.SENDGRID_FROM,
-    subject: "New TTTaxis Booking Confirmed",
+    subject: "NEW PAID BOOKING – READY FOR DISPATCH",
     text:
-`A booking has been confirmed.
+`NEW BOOKING CONFIRMED
 
-Reference: ${bookingRef}
-Customer email: ${email}
-Amount paid: £${amountPaid}
+Reference:
+${bookingRef}
 
-Check Square dashboard for full details.`
+Customer:
+${name || "Not provided"}
+${phone || "Not provided"}
+${email}
+
+Pickup:
+${pickup}
+
+Drop-off:
+${dropoff}
+
+Pickup date & time:
+${pickupTime}
+
+Amount paid:
+£${amountPaid}
+
+Further information:
+${notes}`
   };
 
-  try {
-    await sgMail.send(customerEmail);
-    await sgMail.send(operatorEmail);
-    console.log("SENDGRID: booking emails sent successfully");
-  } catch (err) {
-    console.error("SENDGRID ERROR");
-    console.error(err.response?.body || err);
-    throw err;
-  }
+  await sgMail.send(customerEmail);
+  await sgMail.send(operatorEmail);
 }
 
 /* =========================
@@ -279,7 +311,11 @@ app.post("/create-payment", async (req, res) => {
       dropoff,
       price_gbp_inc_vat,
       payment_type,
-      email
+      email,
+      name,
+      phone,
+      pickup_time,
+      additional_info
     } = req.body;
 
     if (!email) {
@@ -316,7 +352,14 @@ app.post("/create-payment", async (req, res) => {
         pre_populated_data: {
           buyer_email: email
         },
-        note: `Booking ${booking_id} | ${pickup} → ${dropoff}`
+        note:
+`Booking ${booking_id}
+Name: ${name || ""}
+Phone: ${phone || ""}
+Pickup: ${pickup}
+Dropoff: ${dropoff}
+Time: ${pickup_time || ""}
+Notes: ${additional_info || ""}`
       }
     );
 
@@ -333,39 +376,47 @@ app.post("/create-payment", async (req, res) => {
 /* ---------- SQUARE WEBHOOK ---------- */
 app.post("/square/webhook", async (req, res) => {
   try {
-    console.log("SQUARE WEBHOOK HIT");
-
     const event = JSON.parse(req.body.toString("utf8"));
-    console.log("EVENT TYPE:", event.type);
 
-    if (!event.type.startsWith("payment.")) {
+    if (!event.type?.startsWith("payment.")) {
       return res.status(200).send("Ignored");
     }
 
     const payment = event.data.object.payment;
-    console.log("PAYMENT STATUS:", payment.status);
-    console.log("BUYER EMAIL:", payment.buyer_email_address);
 
     if (payment.status !== "COMPLETED") {
       return res.status(200).send("Not completed");
     }
 
-    const amountPaid = payment.amount_money.amount / 100;
-    const bookingRef = payment.note || "TTTAXIS";
+    const rawNote = payment.note || "";
+    const lines = rawNote.split("\n").map(l => l.trim());
 
-    const emailToUse =
-      payment.buyer_email_address || process.env.OPERATOR_EMAIL;
+    const getValue = (label) =>
+      lines.find(l => l.startsWith(label))?.replace(label, "").trim();
 
-    await sendBookingEmails({
-      email: emailToUse,
-      bookingRef,
-      amountPaid
+    const bookingData = {
+      bookingRef: getValue("Booking") || "TTTAXIS",
+      name: getValue("Name:"),
+      phone: getValue("Phone:"),
+      pickup: getValue("Pickup:"),
+      dropoff: getValue("Dropoff:"),
+      pickupTime: getValue("Time:"),
+      additionalInfo: getValue("Notes:"),
+      email: payment.buyer_email_address || process.env.OPERATOR_EMAIL,
+      amountPaid: payment.amount_money.amount / 100
+    };
+
+    await sendBookingEmails(bookingData);
+
+    /* FUTURE: TaxiCaller API
+    await axios.post("https://api.taxicaller.com/v1/bookings", bookingData, {
+      headers: { Authorization: `Bearer ${process.env.TAXICALLER_API_KEY}` }
     });
+    */
 
     res.status(200).send("OK");
   } catch (err) {
-    console.error("WEBHOOK ERROR");
-    console.error(err);
+    console.error("WEBHOOK ERROR", err);
     res.status(500).send("Webhook error");
   }
 });
@@ -376,4 +427,3 @@ app.post("/square/webhook", async (req, res) => {
 app.listen(PORT, () => {
   console.log("TTTaxis backend running on port " + PORT);
 });
-

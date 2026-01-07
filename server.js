@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import crypto from "crypto";
 import axios from "axios";
-import fetch from "node-fetch";
 import sgMail from "@sendgrid/mail";
 
 /* =========================

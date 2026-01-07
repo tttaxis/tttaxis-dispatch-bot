@@ -167,10 +167,10 @@ async function squareRequest(path, body) {
 }
 
 /* =========================
-   EMAIL HELPER (HARDENED)
+   EMAIL HELPER (WITH SAFETY NET)
 ========================= */
 async function sendBookingEmails({ email, bookingRef, amountPaid }) {
-  console.log("SENDGRID: sending booking emails", {
+  console.log("SENDGRID: preparing booking emails", {
     email,
     bookingRef,
     amountPaid
@@ -210,9 +210,9 @@ Check Square dashboard for full details.`
   try {
     await sgMail.send(customerEmail);
     await sgMail.send(operatorEmail);
-    console.log("SENDGRID: booking emails sent");
+    console.log("SENDGRID: booking emails sent successfully");
   } catch (err) {
-    console.error("SENDGRID FAILED");
+    console.error("SENDGRID ERROR");
     console.error(err.response?.body || err);
     throw err;
   }
@@ -227,8 +227,6 @@ app.get("/health", (req, res) => {
 
 /* ---------- TEST SENDGRID ---------- */
 app.get("/test-sendgrid", async (req, res) => {
-  console.log("TEST SENDGRID ROUTE HIT");
-
   try {
     await sgMail.send({
       to: process.env.OPERATOR_EMAIL,
@@ -248,6 +246,7 @@ app.get("/test-sendgrid", async (req, res) => {
 app.post("/quote", async (req, res) => {
   try {
     const { pickup, dropoff } = req.body;
+
     if (!pickup || !dropoff) {
       return res.status(400).json({ error: "Missing locations" });
     }
@@ -334,13 +333,18 @@ app.post("/create-payment", async (req, res) => {
 /* ---------- SQUARE WEBHOOK ---------- */
 app.post("/square/webhook", async (req, res) => {
   try {
-    const event = JSON.parse(req.body.toString("utf8"));
+    console.log("SQUARE WEBHOOK HIT");
 
-    if (event.type !== "payment.updated") {
+    const event = JSON.parse(req.body.toString("utf8"));
+    console.log("EVENT TYPE:", event.type);
+
+    if (!event.type.startsWith("payment.")) {
       return res.status(200).send("Ignored");
     }
 
     const payment = event.data.object.payment;
+    console.log("PAYMENT STATUS:", payment.status);
+    console.log("BUYER EMAIL:", payment.buyer_email_address);
 
     if (payment.status !== "COMPLETED") {
       return res.status(200).send("Not completed");
@@ -348,19 +352,20 @@ app.post("/square/webhook", async (req, res) => {
 
     const amountPaid = payment.amount_money.amount / 100;
     const bookingRef = payment.note || "TTTAXIS";
-    const customerEmail = payment.buyer_email_address;
 
-    if (customerEmail) {
-      await sendBookingEmails({
-        email: customerEmail,
-        bookingRef,
-        amountPaid
-      });
-    }
+    const emailToUse =
+      payment.buyer_email_address || process.env.OPERATOR_EMAIL;
+
+    await sendBookingEmails({
+      email: emailToUse,
+      bookingRef,
+      amountPaid
+    });
 
     res.status(200).send("OK");
   } catch (err) {
-    console.error(err.message);
+    console.error("WEBHOOK ERROR");
+    console.error(err);
     res.status(500).send("Webhook error");
   }
 });
@@ -371,3 +376,4 @@ app.post("/square/webhook", async (req, res) => {
 app.listen(PORT, () => {
   console.log("TTTaxis backend running on port " + PORT);
 });
+

@@ -14,7 +14,7 @@
     "express": "^4.19.2",
     "cors": "^2.8.5",
     "axios": "^1.6.8",
-    "@sendgrid/mail": "^8.1.4"
+    "@sendgrid/mail": "^8.1.4",
     "pg": "^8.11.5"
   }
 }

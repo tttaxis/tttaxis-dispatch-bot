@@ -971,13 +971,6 @@ app.post("/api/lookup", async (req, res) => {
   } catch (e) {
     console.error("DB init failed:", e);
   }
-
-  app.listen(PORT, () => {
-    console.log("TTTaxis backend running on port " + PORT);
-  });
-})();
-
-
 /* =========================
    START SERVER
 ========================= */

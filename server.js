@@ -979,8 +979,10 @@ dbInit()
     });
   });
 
+/* =========================
    START SERVER
 ========================= */
+
 app.listen(PORT, () => {
   console.log("TTTaxis backend running on port " + PORT);
 });

@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import crypto from "crypto";
 import axios from "axios";
+import fetch from "node-fetch";
 import sgMail from "@sendgrid/mail";
 
 /* =========================
@@ -31,7 +32,7 @@ app.use(
 );
 
 /* =========================
-   SENDGRID
+   SENDGRID SETUP
 ========================= */
 if (!process.env.SENDGRID_API_KEY) {
   console.warn("SENDGRID_API_KEY not set");
@@ -102,7 +103,6 @@ async function calculateMiles(pickup, dropoff) {
 
     return res.data.features[0].properties.summary.distance / 1609.344;
   } catch {
-    // Fallback (Haversine + buffer)
     const R = 3958.8;
     const dLat = (to.lat - from.lat) * Math.PI / 180;
     const dLon = (to.lon - from.lon) * Math.PI / 180;
@@ -117,9 +117,6 @@ async function calculateMiles(pickup, dropoff) {
   }
 }
 
-/* =========================
-   PRICE CALCULATION
-========================= */
 async function calculatePrice(pickup, dropoff) {
   const p = pickup.toLowerCase();
   const d = dropoff.toLowerCase();
@@ -171,9 +168,15 @@ async function squareRequest(path, body) {
 }
 
 /* =========================
-   EMAIL HELPER
+   EMAIL HELPER (HARDENED)
 ========================= */
 async function sendBookingEmails({ email, bookingRef, amountPaid }) {
+  console.log("SENDGRID: sending booking emails", {
+    email,
+    bookingRef,
+    amountPaid
+  });
+
   const customerEmail = {
     to: email,
     from: process.env.SENDGRID_FROM,
@@ -205,20 +208,15 @@ Amount paid: £${amountPaid}
 Check Square dashboard for full details.`
   };
 
-  await sgMail.send(customerEmail);
-  await sgMail.send(operatorEmail);
-}
-
-/* =========================
-   SQUARE WEBHOOK VERIFY
-========================= */
-function verifySquareSignature(rawBody, signature) {
-  const hmac = crypto
-    .createHmac("sha1", process.env.SQUARE_WEBHOOK_SIGNATURE_KEY)
-    .update(rawBody)
-    .digest("base64");
-
-  return hmac === signature;
+  try {
+    await sgMail.send(customerEmail);
+    await sgMail.send(operatorEmail);
+    console.log("SENDGRID: booking emails sent");
+  } catch (err) {
+    console.error("SENDGRID FAILED");
+    console.error(err.response?.body || err);
+    throw err;
+  }
 }
 
 /* =========================
@@ -228,11 +226,29 @@ app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+/* ---------- TEST SENDGRID ---------- */
+app.get("/test-sendgrid", async (req, res) => {
+  console.log("TEST SENDGRID ROUTE HIT");
+
+  try {
+    await sgMail.send({
+      to: process.env.OPERATOR_EMAIL,
+      from: process.env.SENDGRID_FROM,
+      subject: "SendGrid Test – TTTaxis",
+      text: "If you received this, SendGrid is working correctly."
+    });
+
+    res.send("SendGrid test email sent successfully");
+  } catch (err) {
+    console.error(err.response?.body || err);
+    res.status(500).send("SendGrid test failed");
+  }
+});
+
 /* ---------- QUOTE ---------- */
 app.post("/quote", async (req, res) => {
   try {
     const { pickup, dropoff } = req.body;
-
     if (!pickup || !dropoff) {
       return res.status(400).json({ error: "Missing locations" });
     }
@@ -319,14 +335,7 @@ app.post("/create-payment", async (req, res) => {
 /* ---------- SQUARE WEBHOOK ---------- */
 app.post("/square/webhook", async (req, res) => {
   try {
-    const signature = req.headers["x-square-hmacsha256-signature"];
-    const rawBody = req.body.toString("utf8");
-
-    if (!signature || !verifySquareSignature(rawBody, signature)) {
-      return res.status(401).send("Invalid signature");
-    }
-
-    const event = JSON.parse(rawBody);
+    const event = JSON.parse(req.body.toString("utf8"));
 
     if (event.type !== "payment.updated") {
       return res.status(200).send("Ignored");

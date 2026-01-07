@@ -965,19 +965,18 @@ app.post("/api/lookup", async (req, res) => {
 /* =========================
    START SERVER
 ========================= */
-dbInit()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log("TTTaxis backend running on port " + PORT);
-    });
-  })
-  .catch((e) => {
+(async () => {
+  try {
+    await dbInit();
+  } catch (e) {
     console.error("DB init failed:", e);
-    // Start anyway (keeps existing system operational)
-    app.listen(PORT, () => {
-      console.log("TTTaxis backend running (DB init failed) on port " + PORT);
-    });
+  }
+
+  app.listen(PORT, () => {
+    console.log("TTTaxis backend running on port " + PORT);
   });
+})();
+
 
 /* =========================
    START SERVER

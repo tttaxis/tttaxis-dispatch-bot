@@ -43,7 +43,9 @@ if (process.env.SENDGRID_API_KEY) {
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
+      ssl: process.env.NODE_ENV === "production"
+        ? { rejectUnauthorized: false }
+        : false
     })
   : null;
 
@@ -53,6 +55,7 @@ async function dbInit() {
     return;
   }
 
+  /* BOOKINGS TABLE */
   await pool.query(`
     CREATE TABLE IF NOT EXISTS bookings (
       id BIGSERIAL PRIMARY KEY,
@@ -74,7 +77,48 @@ async function dbInit() {
     );
   `);
 
+  /* DRIVER APPLICATIONS TABLE */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS driver_applications (
+      id BIGSERIAL PRIMARY KEY,
+
+      -- Personal details
+      full_name TEXT NOT NULL,
+      address TEXT NOT NULL,
+      date_of_birth DATE NOT NULL,
+      phone TEXT NOT NULL,
+      email TEXT NOT NULL,
+
+      -- Licensing documents
+      driving_licence_front_path TEXT NOT NULL,
+      driving_licence_back_path TEXT NOT NULL,
+      ph_or_hackney_licence_path TEXT NOT NULL,
+
+      -- DBS & DVLA
+      dbs_certificate_path TEXT NOT NULL,
+      dbs_update_service_code TEXT,
+      dvla_check_code TEXT NOT NULL,
+
+      -- Vehicle & insurance
+      has_own_vehicle BOOLEAN NOT NULL DEFAULT false,
+      vehicle_registration TEXT,
+      hire_and_reward_insurance_path TEXT,
+      public_liability_insurance_path TEXT,
+
+      -- English language verification
+      english_audio_path TEXT NOT NULL,
+
+      -- Admin workflow
+      status TEXT NOT NULL DEFAULT 'submitted',
+      admin_notes TEXT,
+
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      reviewed_at TIMESTAMPTZ
+    );
+  `);
+
   console.log("DB: bookings table ready");
+  console.log("DB: driver_applications table ready");
 }
 
 /* =========================
@@ -91,8 +135,8 @@ const VAT_RATE = 0.2;
 const MIN_FARE = 4.2;
 const PER_MILE = 2.2;
 
-async function calculatePrice(pickup, dropoff) {
-  const miles = 10; // placeholder – you already had routing logic
+async function calculatePrice() {
+  const miles = 10; // placeholder
   const base = Math.max(MIN_FARE, miles * PER_MILE);
   return Number((base * (1 + VAT_RATE)).toFixed(2));
 }
@@ -188,8 +232,7 @@ app.get("/health", (req, res) => {
 /* ---------- QUOTE ---------- */
 app.post("/quote", async (req, res) => {
   try {
-    const { pickup, dropoff } = req.body;
-    const price = await calculatePrice(pickup, dropoff);
+    const price = await calculatePrice();
     res.json({ price_gbp_inc_vat: price });
   } catch {
     res.status(422).json({ error: "Unable to quote" });
@@ -244,52 +287,72 @@ Notes:${additional_info}
   }
 
   res.json({
-    checkout_url: "https://squareup.com", // placeholder
+    checkout_url: "https://squareup.com",
     booking_ref: bookingRef
   });
 });
 
-/* ---------- SQUARE WEBHOOK ---------- */
-app.post("/square/webhook", async (req, res) => {
+/* ---------- DRIVER APPLICATION (PHASE A) ---------- */
+app.post("/drivers/apply", async (req, res) => {
   try {
-    const event = JSON.parse(req.body.toString("utf8"));
-    if (event.type !== "payment.updated") return res.sendStatus(200);
+    if (!pool) return res.status(503).json({ error: "DB unavailable" });
 
-    const payment = event.data.object.payment;
-    if (payment.status !== "COMPLETED") return res.sendStatus(200);
+    const {
+      full_name,
+      address,
+      date_of_birth,
+      phone,
+      email,
+      dvla_check_code,
+      dbs_update_service_code,
+      has_own_vehicle,
+      vehicle_registration
+    } = req.body;
 
-    const note = payment.note || "";
-    const refLine = note.split("\n").find(l => l.startsWith("BookingRef:"));
-    const bookingRef = refLine?.split(":")[1];
+    await pool.query(
+      `
+      INSERT INTO driver_applications (
+        full_name, address, date_of_birth, phone, email,
+        dvla_check_code, dbs_update_service_code,
+        has_own_vehicle, vehicle_registration,
+        driving_licence_front_path,
+        driving_licence_back_path,
+        ph_or_hackney_licence_path,
+        dbs_certificate_path,
+        english_audio_path,
+        status
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+              'PENDING','PENDING','PENDING','PENDING','PENDING','submitted')
+      `,
+      [
+        full_name,
+        address,
+        date_of_birth,
+        phone,
+        email,
+        dvla_check_code,
+        dbs_update_service_code || null,
+        has_own_vehicle === true,
+        vehicle_registration || null
+      ]
+    );
 
-    if (pool && bookingRef) {
-      await pool.query(
-        `UPDATE bookings SET payment_status='paid', amount_paid=$1 WHERE booking_ref=$2`,
-        [payment.amount_money.amount / 100, bookingRef]
-      );
-    }
-
-    await sendBookingEmails({
-      bookingRef,
-      amountPaid: payment.amount_money.amount / 100,
-      paymentType: "online",
-      email: payment.buyer_email_address
-    });
-
-    res.sendStatus(200);
+    res.json({ ok: true, message: "Driver application received" });
   } catch (e) {
     console.error(e);
-    res.sendStatus(500);
+    res.status(500).json({ error: "Unable to submit application" });
   }
 });
 
-/* ---------- ADMIN DASHBOARD ---------- */
-app.get("/admin", requireAdmin, async (req, res) => {
-  const rows = pool
-    ? (await pool.query(`SELECT * FROM bookings ORDER BY created_at DESC`)).rows
-    : [];
-
-  res.send(`<pre>${JSON.stringify(rows, null, 2)}</pre>`);
+/* ---------- ADMIN: DRIVER APPLICATIONS ---------- */
+app.get("/admin/drivers", requireAdmin, async (req, res) => {
+  const rows = await pool.query(
+    `SELECT id, full_name, email, phone, status, created_at
+     FROM driver_applications
+     ORDER BY created_at DESC`
+  );
+  res.json(rows.rows);
 });
 
 /* ---------- BOOKING LOOKUP ---------- */
@@ -317,7 +380,7 @@ app.post("/api/lookup", async (req, res) => {
 });
 
 /* =========================
-   START SERVER (ONCE)
+   START SERVER
 ========================= */
 (async () => {
   try {
@@ -330,4 +393,3 @@ app.post("/api/lookup", async (req, res) => {
     console.log("TTTaxis backend running on port " + PORT);
   });
 })();
-

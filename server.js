@@ -6,6 +6,12 @@ import sgMail from "@sendgrid/mail";
 import { Pool } from "pg";
 
 /* =========================
+   CONSTANTS
+========================= */
+const GOOGLE_REVIEW_URL =
+  "https://www.google.com/maps/place/TTTaxis/@54.0604009,-2.8197903,17z/data=!3m1!4b1!4m6!3m5!1s0x487c9d6897d9dd73:0x472ee023df606acd!8m2!3d54.0604009!4d-2.8197903!16s%2Fg%2F11ympk_1b4?entry=ttu";
+
+/* =========================
    APP SETUP
 ========================= */
 const app = express();
@@ -43,9 +49,10 @@ if (process.env.SENDGRID_API_KEY) {
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: process.env.NODE_ENV === "production"
-        ? { rejectUnauthorized: false }
-        : false
+      ssl:
+        process.env.NODE_ENV === "production"
+          ? { rejectUnauthorized: false }
+          : false
     })
   : null;
 
@@ -71,7 +78,6 @@ async function dbInit() {
       amount_paid NUMERIC,
       payment_status TEXT,
       status TEXT DEFAULT 'new',
-      square_note TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
@@ -125,7 +131,7 @@ async function dispatchToTaxiCaller(booking) {
 }
 
 /* =========================
-   EMAILS
+   EMAILS (WITH GOOGLE REVIEW LINK)
 ========================= */
 async function sendBookingEmails(data) {
   if (!process.env.SENDGRID_FROM || !process.env.OPERATOR_EMAIL) return;
@@ -149,6 +155,8 @@ async function sendBookingEmails(data) {
       from: process.env.SENDGRID_FROM,
       subject: "Your TTTaxis Booking Confirmation",
       text: `
+Thank you for booking with TTTaxis.
+
 Booking reference: ${bookingRef}
 
 Pickup: ${pickup}
@@ -159,6 +167,9 @@ Paid: £${amountPaid}
 Payment type: ${paymentType}
 
 Notes: ${additionalInfo || "None"}
+
+If you were happy with your journey, we’d really appreciate a Google review:
+${GOOGLE_REVIEW_URL}
 
 TTTaxis
 01539 556160
@@ -215,7 +226,7 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, time: nowIso() });
 });
 
-/* ---------- CREATE PAYMENT (SIMPLIFIED) ---------- */
+/* ---------- CREATE PAYMENT ---------- */
 app.post("/create-payment", async (req, res) => {
   const {
     pickup,
@@ -235,8 +246,10 @@ app.post("/create-payment", async (req, res) => {
     await pool.query(
       `
       INSERT INTO bookings
-      (booking_ref, customer_name, customer_email, customer_phone, pickup, dropoff, pickup_time, additional_info, price, payment_type, payment_status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid')
+      (booking_ref, customer_name, customer_email, customer_phone,
+       pickup, dropoff, pickup_time, additional_info,
+       price, payment_type, amount_paid, payment_status)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,'paid')
       `,
       [
         bookingRef,
@@ -266,7 +279,10 @@ app.post("/create-payment", async (req, res) => {
     email
   });
 
-  res.json({ booking_ref: bookingRef });
+  res.json({
+    booking_ref: bookingRef,
+    review_url: GOOGLE_REVIEW_URL
+  });
 });
 
 /* =========================
@@ -277,7 +293,6 @@ app.post(
   requireAdmin,
   async (req, res) => {
     if (!pool) return res.status(503).json({ error: "DB unavailable" });
-
     if (!taxiCallerConfigured()) {
       return res.status(400).json({ error: "TaxiCaller API not configured" });
     }
@@ -332,6 +347,13 @@ button.disabled{background:#aaa}
 </head>
 <body>
 <h2>TTTaxis Admin</h2>
+
+<p>
+<a href="${GOOGLE_REVIEW_URL}" target="_blank">
+⭐ View Google Reviews
+</a>
+</p>
+
 <table>
 <tr><th>Ref</th><th>Route</th><th>Status</th><th>Dispatch</th></tr>
 ${rows.map(b => `
@@ -376,6 +398,12 @@ async function dispatch(ref){
   } catch (e) {
     console.error("DB init failed", e);
   }
+
+  app.listen(PORT, () => {
+    console.log("TTTaxis backend running on port " + PORT);
+  });
+})();
+
 
   app.listen(PORT, () => {
     console.log("TTTaxis backend running on port " + PORT);

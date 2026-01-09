@@ -403,9 +403,3 @@ async function dispatch(ref){
     console.log("TTTaxis backend running on port " + PORT);
   });
 })();
-
-
-  app.listen(PORT, () => {
-    console.log("TTTaxis backend running on port " + PORT);
-  });
-})();

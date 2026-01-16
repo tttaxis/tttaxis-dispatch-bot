@@ -1,15 +1,8 @@
 import express from "express";
-import cors from "cors";
 import crypto from "crypto";
 import axios from "axios";
 import sgMail from "@sendgrid/mail";
 import { Pool } from "pg";
-
-/* =========================
-   CONSTANTS
-========================= */
-const GOOGLE_REVIEW_URL =
-  "https://www.google.com/maps/place/TTTaxis/@54.0604009,-2.8197903";
 
 /* =========================
    APP SETUP
@@ -18,32 +11,38 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 /* =========================
-   RAW BODY (Square Webhook)
+   🔥 GLOBAL CORS + PREFLIGHT FIX
+   (THIS IS THE ROOT CAUSE FIX)
 ========================= */
-app.use("/square/webhook", express.raw({ type: "application/json" }));
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PATCH,OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
+
+  // ⛔ CRITICAL: short-circuit OPTIONS
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
 
 /* =========================
-   GENERAL MIDDLEWARE
+   BODY PARSER
 ========================= */
 app.use(express.json({ limit: "256kb" }));
 
-const corsConfig = cors({
-  origin: [
-    "https://tttaxis.uk",
-    "https://www.tttaxis.uk",
-    "https://lancastertttaxis.uk",
-    "https://www.lancastertttaxis.uk"
-  ],
-  methods: ["GET", "POST", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-});
-
-app.use(corsConfig);
-
 /* =========================
-   CORS PREFLIGHT (FIX)
+   CONSTANTS
 ========================= */
-app.options("*", corsConfig);
+const GOOGLE_REVIEW_URL =
+  "https://www.google.com/maps/place/TTTaxis/@54.0604009,-2.8197903";
 
 /* =========================
    SENDGRID
@@ -55,21 +54,18 @@ if (process.env.SENDGRID_API_KEY) {
 }
 
 /* =========================
-   DATABASE (Postgres)
+   DATABASE (POSTGRES)
 ========================= */
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl:
-        process.env.NODE_ENV === "production"
-          ? { rejectUnauthorized: false }
-          : false
+      ssl: { rejectUnauthorized: false }
     })
   : null;
 
 async function dbInit() {
   if (!pool) {
-    console.warn("DATABASE_URL not set – DB features disabled");
+    console.warn("DATABASE_URL not set – DB disabled");
     return;
   }
 
@@ -94,7 +90,7 @@ async function dbInit() {
     );
   `);
 
-  console.log("DB: bookings table ready");
+  console.log("DB ready");
 }
 
 /* =========================
@@ -105,7 +101,7 @@ function nowIso() {
 }
 
 /* =========================
-   TAXICALLER (SAFE / DORMANT)
+   TAXICALLER (SAFE / OPTIONAL)
 ========================= */
 function taxiCallerConfigured() {
   return Boolean(
@@ -143,23 +139,23 @@ async function dispatchToTaxiCaller(booking) {
 }
 
 /* =========================
-   EMAILS (GBP £)
+   EMAILS
 ========================= */
 async function sendBookingEmails(data) {
   if (!process.env.SENDGRID_FROM || !process.env.OPERATOR_EMAIL) return;
 
-  const areaLabel =
+  const area =
     data.service_area === "lancaster" ? "Lancaster" : "Kendal";
 
   await sgMail.send([
     {
       to: data.email,
       from: process.env.SENDGRID_FROM,
-      subject: `Your ${areaLabel} Taxi Booking Confirmation`,
+      subject: `Your ${area} Taxi Booking Confirmation`,
       text: `
-Thank you for booking with TTTaxis ${areaLabel}.
+Thank you for booking with TTTaxis ${area}.
 
-Booking reference: ${data.bookingRef}
+Reference: ${data.bookingRef}
 
 Pickup: ${data.pickup}
 Drop-off: ${data.dropoff}
@@ -170,20 +166,16 @@ Payment type: ${data.paymentType}
 
 Notes: ${data.additionalInfo || "None"}
 
-If you were happy with your journey, please leave a review:
+Leave a review:
 ${GOOGLE_REVIEW_URL}
-
-TTTaxis
-01539 556160
 `
     },
     {
       to: process.env.OPERATOR_EMAIL,
       from: process.env.SENDGRID_FROM,
-      subject: `NEW ${areaLabel.toUpperCase()} BOOKING`,
+      subject: `NEW ${area.toUpperCase()} BOOKING`,
       text: `
 REF: ${data.bookingRef}
-AREA: ${areaLabel}
 
 Customer: ${data.name}
 Phone: ${data.phone}
@@ -193,16 +185,14 @@ Pickup: ${data.pickup}
 Drop-off: ${data.dropoff}
 Time: ${data.pickupTime}
 
-Amount paid: £${data.amountPaid}
-
-Notes: ${data.additionalInfo || "None"}
+Paid: £${data.amountPaid}
 `
     }
   ]);
 }
 
 /* =========================
-   BASIC ADMIN AUTH
+   ADMIN AUTH
 ========================= */
 function requireAdmin(req, res, next) {
   const auth = req.headers.authorization || "";
@@ -230,35 +220,32 @@ app.get("/health", (req, res) => {
 });
 
 /* =========================
-   QUOTE (GBP)
+   QUOTE (NOW GUARANTEED)
 ========================= */
-app.post("/quote", async (req, res) => {
-  try {
-    const { pickup, dropoff, service_area } = req.body;
+app.post("/quote", (req, res) => {
+  console.log("QUOTE HIT", req.body);
 
-    if (!pickup || !dropoff) {
-      return res.status(400).json({ error: "Missing locations" });
-    }
+  const { pickup, dropoff, service_area } = req.body;
 
-    let price = 25;
-    const d = dropoff.toLowerCase();
-
-    if (d.includes("manchester"))
-      price = service_area === "lancaster" ? 85 : 75;
-    if (d.includes("liverpool"))
-      price = service_area === "lancaster" ? 95 : 85;
-    if (d.includes("leeds"))
-      price = service_area === "lancaster" ? 80 : 70;
-
-    res.json({ price_gbp_inc_vat: price });
-  } catch (err) {
-    console.error("QUOTE ERROR:", err);
-    res.status(500).json({ error: "Quote failed" });
+  if (!pickup || !dropoff) {
+    return res.status(400).json({ error: "Missing locations" });
   }
+
+  let price = 25;
+  const d = dropoff.toLowerCase();
+
+  if (d.includes("manchester"))
+    price = service_area === "lancaster" ? 85 : 75;
+  if (d.includes("liverpool"))
+    price = service_area === "lancaster" ? 95 : 85;
+  if (d.includes("leeds"))
+    price = service_area === "lancaster" ? 80 : 70;
+
+  res.json({ price_gbp_inc_vat: price });
 });
 
 /* =========================
-   CREATE PAYMENT (GBP)
+   CREATE PAYMENT
 ========================= */
 app.post("/create-payment", async (req, res) => {
   const {
@@ -322,19 +309,88 @@ app.post("/create-payment", async (req, res) => {
 });
 
 /* =========================
+   MANUAL DISPATCH
+========================= */
+app.post(
+  "/admin/dispatch/:booking_ref",
+  requireAdmin,
+  async (req, res) => {
+    if (!pool) return res.status(503).json({ error: "DB unavailable" });
+    if (!taxiCallerConfigured()) {
+      return res.status(400).json({ error: "TaxiCaller not configured" });
+    }
+
+    const ref = req.params.booking_ref;
+
+    const r = await pool.query(
+      `SELECT * FROM bookings WHERE booking_ref=$1 LIMIT 1`,
+      [ref]
+    );
+
+    const booking = r.rows[0];
+    if (!booking) return res.status(404).json({ error: "Booking not found" });
+
+    await dispatchToTaxiCaller(booking);
+
+    await pool.query(
+      `UPDATE bookings SET status='dispatched' WHERE booking_ref=$1`,
+      [ref]
+    );
+
+    res.json({ ok: true });
+  }
+);
+
+/* =========================
+   ADMIN DASHBOARD
+========================= */
+app.get("/admin", requireAdmin, async (req, res) => {
+  const rows = pool
+    ? (await pool.query(
+        `SELECT * FROM bookings ORDER BY created_at DESC`
+      )).rows
+    : [];
+
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+<title>TTTaxis Admin</title>
+<style>
+body{font-family:Arial;padding:20px}
+table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #ccc;padding:8px}
+th{background:#f5f5f5}
+</style>
+</head>
+<body>
+<h2>TTTaxis Admin</h2>
+<table>
+<tr><th>Ref</th><th>Area</th><th>Route</th><th>Status</th></tr>
+${rows.map(b => `
+<tr>
+<td>${b.booking_ref}</td>
+<td>${b.service_area}</td>
+<td>${b.pickup} → ${b.dropoff}</td>
+<td>${b.status}</td>
+</tr>
+`).join("")}
+</table>
+</body>
+</html>
+`);
+});
+
+/* =========================
    START SERVER
 ========================= */
 (async () => {
-  try {
-    await dbInit();
-  } catch (e) {
-    console.error("DB init failed", e);
-  }
-
-  app.listen(PORT, () => {
-    console.log("TTTaxis backend running on port " + PORT);
-  });
+  await dbInit();
+  app.listen(PORT, () =>
+    console.log("TTTaxis backend running on port " + PORT)
+  );
 })();
+
 
 
 

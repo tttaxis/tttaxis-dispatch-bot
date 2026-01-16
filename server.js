@@ -3,59 +3,65 @@ import crypto from "crypto";
 import axios from "axios";
 import sgMail from "@sendgrid/mail";
 import { Pool } from "pg";
+import { Client, Environment } from "square";
 
-/* =========================
+/* =========================================================
    APP SETUP
-========================= */
+========================================================= */
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-/* =========================
-   🔥 GLOBAL CORS + PREFLIGHT FIX
-   (THIS IS THE ROOT CAUSE FIX)
-========================= */
+/* =========================================================
+   🔥 GLOBAL CORS + PREFLIGHT FIX (WORDPRESS SAFE)
+========================================================= */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,POST,PATCH,OPTIONS"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization"
   );
 
-  // ⛔ CRITICAL: short-circuit OPTIONS
   if (req.method === "OPTIONS") {
     return res.sendStatus(200);
   }
-
   next();
 });
 
-/* =========================
+/* =========================================================
    BODY PARSER
-========================= */
+========================================================= */
 app.use(express.json({ limit: "256kb" }));
 
-/* =========================
+/* =========================================================
    CONSTANTS
-========================= */
+========================================================= */
 const GOOGLE_REVIEW_URL =
   "https://www.google.com/maps/place/TTTaxis/@54.0604009,-2.8197903";
 
-/* =========================
+/* =========================================================
    SENDGRID
-========================= */
+========================================================= */
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 } else {
   console.warn("SENDGRID_API_KEY not set");
 }
 
-/* =========================
+/* =========================================================
+   SQUARE CLIENT
+========================================================= */
+const square = new Client({
+  accessToken: process.env.SQUARE_ACCESS_TOKEN,
+  environment:
+    process.env.SQUARE_ENV === "production"
+      ? Environment.Production
+      : Environment.Sandbox
+});
+
+/* =========================================================
    DATABASE (POSTGRES)
-========================= */
+========================================================= */
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -83,7 +89,6 @@ async function dbInit() {
       additional_info TEXT,
       price NUMERIC,
       payment_type TEXT,
-      amount_paid NUMERIC,
       payment_status TEXT,
       status TEXT DEFAULT 'new',
       created_at TIMESTAMPTZ DEFAULT NOW()
@@ -93,16 +98,9 @@ async function dbInit() {
   console.log("DB ready");
 }
 
-/* =========================
-   HELPERS
-========================= */
-function nowIso() {
-  return new Date().toISOString();
-}
-
-/* =========================
-   TAXICALLER (SAFE / OPTIONAL)
-========================= */
+/* =========================================================
+   TAXICALLER (OPTIONAL / SAFE)
+========================================================= */
 function taxiCallerConfigured() {
   return Boolean(
     process.env.TAXICALLER_API_KEY &&
@@ -138,9 +136,9 @@ async function dispatchToTaxiCaller(booking) {
   return res.data;
 }
 
-/* =========================
+/* =========================================================
    EMAILS
-========================= */
+========================================================= */
 async function sendBookingEmails(data) {
   if (!process.env.SENDGRID_FROM || !process.env.OPERATOR_EMAIL) return;
 
@@ -191,9 +189,9 @@ Paid: £${data.amountPaid}
   ]);
 }
 
-/* =========================
+/* =========================================================
    ADMIN AUTH
-========================= */
+========================================================= */
 function requireAdmin(req, res, next) {
   const auth = req.headers.authorization || "";
   if (!auth.startsWith("Basic ")) {
@@ -208,23 +206,20 @@ function requireAdmin(req, res, next) {
   if (u !== process.env.ADMIN_USER || p !== process.env.ADMIN_PASS) {
     return res.status(401).send("Invalid credentials");
   }
-
   next();
 }
 
-/* =========================
+/* =========================================================
    ROUTES
-========================= */
+========================================================= */
 app.get("/health", (req, res) => {
-  res.json({ ok: true, time: nowIso() });
+  res.json({ ok: true });
 });
 
-/* =========================
-   QUOTE (NOW GUARANTEED)
-========================= */
+/* =======================
+   QUOTE
+======================= */
 app.post("/quote", (req, res) => {
-  console.log("QUOTE HIT", req.body);
-
   const { pickup, dropoff, service_area } = req.body;
 
   if (!pickup || !dropoff) {
@@ -244,94 +239,112 @@ app.post("/quote", (req, res) => {
   res.json({ price_gbp_inc_vat: price });
 });
 
-/* =========================
-   CREATE PAYMENT
-========================= */
+/* =======================
+   CREATE PAYMENT (SQUARE)
+======================= */
 app.post("/create-payment", async (req, res) => {
-  const {
-    pickup,
-    dropoff,
-    pickup_time,
-    additional_info,
-    email,
-    name,
-    phone,
-    payment_type,
-    price_gbp_inc_vat,
-    service_area
-  } = req.body;
+  try {
+    const {
+      pickup,
+      dropoff,
+      pickup_time,
+      additional_info,
+      email,
+      name,
+      phone,
+      payment_type,
+      price_gbp_inc_vat,
+      service_area
+    } = req.body;
 
-  const bookingRef = "TTT-" + crypto.randomUUID();
+    const bookingRef = "TTT-" + crypto.randomUUID();
 
-  if (pool) {
-    await pool.query(
-      `
-      INSERT INTO bookings
-      (booking_ref, service_area, customer_name, customer_email,
-       customer_phone, pickup, dropoff, pickup_time,
-       additional_info, price, payment_type, amount_paid, payment_status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,'paid')
-      `,
-      [
-        bookingRef,
-        service_area,
-        name,
-        email,
-        phone,
-        pickup,
-        dropoff,
-        pickup_time,
-        additional_info,
-        price_gbp_inc_vat,
-        payment_type
-      ]
-    );
+    const amountPence =
+      payment_type === "deposit"
+        ? Math.round(price_gbp_inc_vat * 0.1 * 100)
+        : Math.round(price_gbp_inc_vat * 100);
+
+    const { result } =
+      await square.checkoutApi.createCheckout(
+        process.env.SQUARE_LOCATION_ID,
+        {
+          idempotencyKey: crypto.randomUUID(),
+          order: {
+            locationId: process.env.SQUARE_LOCATION_ID,
+            lineItems: [
+              {
+                name: "Taxi Booking",
+                quantity: "1",
+                basePriceMoney: {
+                  amount: amountPence,
+                  currency: "GBP"
+                }
+              }
+            ]
+          },
+          redirectUrl: "https://tttaxis.uk/payment-confirmed",
+          note: `${service_area.toUpperCase()} TAXI BOOKING`,
+          prePopulateBuyerEmail: email
+        }
+      );
+
+    if (pool) {
+      await pool.query(
+        `
+        INSERT INTO bookings
+        (booking_ref, service_area, customer_name, customer_email,
+         customer_phone, pickup, dropoff, pickup_time,
+         additional_info, price, payment_type, payment_status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')
+        `,
+        [
+          bookingRef,
+          service_area,
+          name,
+          email,
+          phone,
+          pickup,
+          dropoff,
+          pickup_time,
+          additional_info,
+          price_gbp_inc_vat,
+          payment_type
+        ]
+      );
+    }
+
+    res.json({
+      checkout_url: result.checkout.checkoutPageUrl
+    });
+
+  } catch (err) {
+    console.error("PAYMENT ERROR:", err);
+    res.status(500).json({ error: "Payment setup failed" });
   }
-
-  await sendBookingEmails({
-    bookingRef,
-    pickup,
-    dropoff,
-    pickupTime: pickup_time,
-    additionalInfo: additional_info,
-    amountPaid: price_gbp_inc_vat,
-    paymentType: payment_type,
-    name,
-    phone,
-    email,
-    service_area
-  });
-
-  res.json({
-    booking_ref: bookingRef,
-    checkout_url: "/payment-confirmed/"
-  });
 });
 
-/* =========================
+/* =======================
    MANUAL DISPATCH
-========================= */
+======================= */
 app.post(
   "/admin/dispatch/:booking_ref",
   requireAdmin,
   async (req, res) => {
     if (!pool) return res.status(503).json({ error: "DB unavailable" });
-    if (!taxiCallerConfigured()) {
+    if (!taxiCallerConfigured())
       return res.status(400).json({ error: "TaxiCaller not configured" });
-    }
 
     const ref = req.params.booking_ref;
-
     const r = await pool.query(
       `SELECT * FROM bookings WHERE booking_ref=$1 LIMIT 1`,
       [ref]
     );
 
     const booking = r.rows[0];
-    if (!booking) return res.status(404).json({ error: "Booking not found" });
+    if (!booking)
+      return res.status(404).json({ error: "Booking not found" });
 
     await dispatchToTaxiCaller(booking);
-
     await pool.query(
       `UPDATE bookings SET status='dispatched' WHERE booking_ref=$1`,
       [ref]
@@ -341,9 +354,9 @@ app.post(
   }
 );
 
-/* =========================
+/* =======================
    ADMIN DASHBOARD
-========================= */
+======================= */
 app.get("/admin", requireAdmin, async (req, res) => {
   const rows = pool
     ? (await pool.query(
@@ -381,15 +394,16 @@ ${rows.map(b => `
 `);
 });
 
-/* =========================
+/* =======================
    START SERVER
-========================= */
+======================= */
 (async () => {
   await dbInit();
   app.listen(PORT, () =>
     console.log("TTTaxis backend running on port " + PORT)
   );
 })();
+
 
 
 

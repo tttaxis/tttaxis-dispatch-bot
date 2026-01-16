@@ -26,18 +26,24 @@ app.use("/square/webhook", express.raw({ type: "application/json" }));
    GENERAL MIDDLEWARE
 ========================= */
 app.use(express.json({ limit: "256kb" }));
-app.use(
-  cors({
-    origin: [
-      "https://tttaxis.uk",
-      "https://www.tttaxis.uk",
-      "https://lancastertttaxis.uk",
-      "https://www.lancastertttaxis.uk"
-    ],
-    methods: ["GET", "POST", "PATCH"],
-    allowedHeaders: ["Content-Type", "Authorization"]
-  })
-);
+
+const corsConfig = cors({
+  origin: [
+    "https://tttaxis.uk",
+    "https://www.tttaxis.uk",
+    "https://lancastertttaxis.uk",
+    "https://www.lancastertttaxis.uk"
+  ],
+  methods: ["GET", "POST", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+});
+
+app.use(corsConfig);
+
+/* =========================
+   CORS PREFLIGHT (FIX)
+========================= */
+app.options("*", corsConfig);
 
 /* =========================
    SENDGRID
@@ -137,7 +143,7 @@ async function dispatchToTaxiCaller(booking) {
 }
 
 /* =========================
-   EMAILS
+   EMAILS (GBP £)
 ========================= */
 async function sendBookingEmails(data) {
   if (!process.env.SENDGRID_FROM || !process.env.OPERATOR_EMAIL) return;
@@ -159,7 +165,7 @@ Pickup: ${data.pickup}
 Drop-off: ${data.dropoff}
 Time: ${data.pickupTime}
 
-Paid: £${data.amountPaid}
+Amount paid: £${data.amountPaid}
 Payment type: ${data.paymentType}
 
 Notes: ${data.additionalInfo || "None"}
@@ -187,7 +193,7 @@ Pickup: ${data.pickup}
 Drop-off: ${data.dropoff}
 Time: ${data.pickupTime}
 
-Paid: £${data.amountPaid}
+Amount paid: £${data.amountPaid}
 
 Notes: ${data.additionalInfo || "None"}
 `
@@ -224,7 +230,7 @@ app.get("/health", (req, res) => {
 });
 
 /* =========================
-   QUOTE (FIXED)
+   QUOTE (GBP)
 ========================= */
 app.post("/quote", async (req, res) => {
   try {
@@ -235,12 +241,14 @@ app.post("/quote", async (req, res) => {
     }
 
     let price = 25;
-
     const d = dropoff.toLowerCase();
 
-    if (d.includes("manchester")) price = service_area === "lancaster" ? 85 : 75;
-    if (d.includes("liverpool")) price = service_area === "lancaster" ? 95 : 85;
-    if (d.includes("leeds")) price = service_area === "lancaster" ? 80 : 70;
+    if (d.includes("manchester"))
+      price = service_area === "lancaster" ? 85 : 75;
+    if (d.includes("liverpool"))
+      price = service_area === "lancaster" ? 95 : 85;
+    if (d.includes("leeds"))
+      price = service_area === "lancaster" ? 80 : 70;
 
     res.json({ price_gbp_inc_vat: price });
   } catch (err) {
@@ -250,7 +258,7 @@ app.post("/quote", async (req, res) => {
 });
 
 /* =========================
-   CREATE PAYMENT
+   CREATE PAYMENT (GBP)
 ========================= */
 app.post("/create-payment", async (req, res) => {
   const {
@@ -314,86 +322,6 @@ app.post("/create-payment", async (req, res) => {
 });
 
 /* =========================
-   MANUAL TAXICALLER DISPATCH
-========================= */
-app.post(
-  "/admin/dispatch/:booking_ref",
-  requireAdmin,
-  async (req, res) => {
-    if (!pool) return res.status(503).json({ error: "DB unavailable" });
-    if (!taxiCallerConfigured()) {
-      return res.status(400).json({ error: "TaxiCaller API not configured" });
-    }
-
-    const ref = req.params.booking_ref;
-
-    const r = await pool.query(
-      `SELECT * FROM bookings WHERE booking_ref=$1 LIMIT 1`,
-      [ref]
-    );
-
-    const booking = r.rows[0];
-    if (!booking) return res.status(404).json({ error: "Booking not found" });
-    if (booking.status === "dispatched") {
-      return res.status(400).json({ error: "Already dispatched" });
-    }
-
-    await dispatchToTaxiCaller(booking);
-
-    await pool.query(
-      `UPDATE bookings SET status='dispatched' WHERE booking_ref=$1`,
-      [ref]
-    );
-
-    res.json({ ok: true });
-  }
-);
-
-/* =========================
-   ADMIN DASHBOARD
-========================= */
-app.get("/admin", requireAdmin, async (req, res) => {
-  const rows = pool
-    ? (await pool.query(
-        `SELECT * FROM bookings ORDER BY created_at DESC`
-      )).rows
-    : [];
-
-  res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-<title>TTTaxis Admin</title>
-<style>
-body{font-family:Arial;padding:20px}
-table{border-collapse:collapse;width:100%}
-th,td{border:1px solid #ccc;padding:8px}
-th{background:#f5f5f5}
-button{padding:6px 10px;background:#1f7a3f;color:#fff;border:0;border-radius:4px}
-button.disabled{background:#aaa}
-</style>
-</head>
-<body>
-<h2>TTTaxis Admin</h2>
-
-<table>
-<tr><th>Ref</th><th>Area</th><th>Route</th><th>Status</th></tr>
-${rows.map(b => `
-<tr>
-<td>${b.booking_ref}</td>
-<td>${b.service_area}</td>
-<td>${b.pickup} → ${b.dropoff}</td>
-<td>${b.status}</td>
-</tr>
-`).join("")}
-</table>
-
-</body>
-</html>
-`);
-});
-
-/* =========================
    START SERVER
 ========================= */
 (async () => {
@@ -407,5 +335,6 @@ ${rows.map(b => `
     console.log("TTTaxis backend running on port " + PORT);
   });
 })();
+
 
 

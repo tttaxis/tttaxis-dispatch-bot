@@ -4,12 +4,13 @@ import crypto from "crypto";
 import axios from "axios";
 import sgMail from "@sendgrid/mail";
 import { Pool } from "pg";
+import { Client, Environment } from "square";
 
 /* =========================
    CONSTANTS
 ========================= */
 const GOOGLE_REVIEW_URL =
-  "https://www.google.com/maps/place/TTTaxis/@54.0604009,-2.8197903,17z/data=!3m1!4b1!4m6!3m5!1s0x487c9d6897d9dd73:0x472ee023df606acd!8m2!3d54.0604009!4d-2.8197903!16s%2Fg%2F11ympk_1b4?entry=ttu";
+  "https://www.google.com/maps/place/TTTaxis/@54.0604009,-2.8197903";
 
 /* =========================
    APP SETUP
@@ -28,7 +29,12 @@ app.use("/square/webhook", express.raw({ type: "application/json" }));
 app.use(express.json({ limit: "256kb" }));
 app.use(
   cors({
-    origin: ["https://tttaxis.uk", "https://www.tttaxis.uk"],
+    origin: [
+      "https://tttaxis.uk",
+      "https://www.tttaxis.uk",
+      "https://lancastertttaxis.uk",
+      "https://www.lancastertttaxis.uk"
+    ],
     methods: ["GET", "POST", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"]
   })
@@ -39,33 +45,37 @@ app.use(
 ========================= */
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-} else {
-  console.warn("SENDGRID_API_KEY not set");
 }
 
 /* =========================
-   DATABASE (Postgres)
+   SQUARE CLIENT
+========================= */
+const squareClient = new Client({
+  accessToken: process.env.SQUARE_ACCESS_TOKEN,
+  environment:
+    process.env.SQUARE_ENV === "production"
+      ? Environment.Production
+      : Environment.Sandbox
+});
+
+/* =========================
+   DATABASE
 ========================= */
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl:
-        process.env.NODE_ENV === "production"
-          ? { rejectUnauthorized: false }
-          : false
+      ssl: { rejectUnauthorized: false }
     })
   : null;
 
 async function dbInit() {
-  if (!pool) {
-    console.warn("DATABASE_URL not set – DB features disabled");
-    return;
-  }
+  if (!pool) return;
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS bookings (
       id BIGSERIAL PRIMARY KEY,
       booking_ref TEXT UNIQUE,
+      service_area TEXT,
       customer_name TEXT,
       customer_email TEXT,
       customer_phone TEXT,
@@ -73,258 +83,167 @@ async function dbInit() {
       dropoff TEXT,
       pickup_time TEXT,
       additional_info TEXT,
-      price NUMERIC,
-      payment_type TEXT,
       amount_paid NUMERIC,
       payment_status TEXT,
       status TEXT DEFAULT 'new',
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
-
-  console.log("DB: bookings table ready");
 }
 
 /* =========================
-   HELPERS
+   EMAILS
 ========================= */
-function nowIso() {
-  return new Date().toISOString();
-}
-
-/* =========================
-   TAXICALLER (SAFE / DORMANT)
-========================= */
-function taxiCallerConfigured() {
-  return Boolean(
-    process.env.TAXICALLER_API_KEY &&
-    process.env.TAXICALLER_BASE_URL
-  );
-}
-
-async function dispatchToTaxiCaller(booking) {
-  if (!taxiCallerConfigured()) {
-    throw new Error("TaxiCaller not configured");
-  }
-
-  const payload = {
-    customer_name: booking.customer_name,
-    customer_phone: booking.customer_phone,
-    pickup_address: booking.pickup,
-    destination_address: booking.dropoff,
-    reference: booking.booking_ref,
-    notes: booking.additional_info || ""
-  };
-
-  const res = await axios.post(
-    `${process.env.TAXICALLER_BASE_URL}/api/v1/booker/order`,
-    payload,
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.TAXICALLER_API_KEY}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
-
-  return res.data;
-}
-
-/* =========================
-   EMAILS (WITH GOOGLE REVIEW LINK)
-========================= */
-async function sendBookingEmails(data) {
+async function sendBookingEmails(b) {
   if (!process.env.SENDGRID_FROM || !process.env.OPERATOR_EMAIL) return;
 
-  const {
-    bookingRef,
-    pickup,
-    dropoff,
-    pickupTime,
-    additionalInfo,
-    amountPaid,
-    paymentType,
-    name,
-    phone,
-    email
-  } = data;
+  const areaLabel =
+    b.service_area === "lancaster" ? "Lancaster" : "Kendal";
 
   await sgMail.send([
     {
-      to: email,
+      to: b.customer_email,
       from: process.env.SENDGRID_FROM,
-      subject: "Your TTTaxis Booking Confirmation",
+      subject: `Your ${areaLabel} Taxi Booking Confirmation`,
       text: `
-Thank you for booking with TTTaxis.
+Thank you for booking with TTTaxis ${areaLabel}
 
-Booking reference: ${bookingRef}
+Reference: ${b.booking_ref}
+Pickup: ${b.pickup}
+Drop-off: ${b.dropoff}
+Time: ${b.pickup_time}
 
-Pickup: ${pickup}
-Drop-off: ${dropoff}
-Time: ${pickupTime}
+Paid: £${b.amount_paid}
 
-Paid: £${amountPaid}
-Payment type: ${paymentType}
-
-Notes: ${additionalInfo || "None"}
-
-If you were happy with your journey, we’d really appreciate a Google review:
+Please consider leaving a review:
 ${GOOGLE_REVIEW_URL}
-
-TTTaxis
-01539 556160
 `
     },
     {
       to: process.env.OPERATOR_EMAIL,
       from: process.env.SENDGRID_FROM,
-      subject: "NEW TTTAXIS BOOKING",
+      subject: `NEW ${areaLabel.toUpperCase()} BOOKING`,
       text: `
-REF: ${bookingRef}
+REF: ${b.booking_ref}
+AREA: ${areaLabel}
 
-Customer: ${name}
-Phone: ${phone}
-Email: ${email}
+Customer: ${b.customer_name}
+Phone: ${b.customer_phone}
 
-Pickup: ${pickup}
-Drop-off: ${dropoff}
-Time: ${pickupTime}
-
-Paid: £${amountPaid}
-
-Notes: ${additionalInfo || "None"}
+${b.pickup} → ${b.dropoff}
+Time: ${b.pickup_time}
+Paid: £${b.amount_paid}
 `
     }
   ]);
 }
 
 /* =========================
-   BASIC ADMIN AUTH
+   HEALTH
+========================= */
+app.get("/health", (_, res) => {
+  res.json({ ok: true });
+});
+
+/* =========================
+   MAIN BOOKING + PAYMENT
+========================= */
+app.post("/book", async (req, res) => {
+  try {
+    const {
+      pickup,
+      destination,
+      date,
+      time,
+      passengers,
+      email,
+      phone,
+      sourceId,
+      service_area
+    } = req.body;
+
+    if (!sourceId || !service_area) {
+      return res.status(400).json({ error: "Invalid booking request" });
+    }
+
+    const booking_ref = "TTT-" + crypto.randomUUID();
+    const amount = 5000; // example £50 – replace with your pricing logic
+
+    const payment = await squareClient.paymentsApi.createPayment({
+      sourceId,
+      idempotencyKey: crypto.randomUUID(),
+      amountMoney: {
+        amount,
+        currency: "GBP"
+      },
+      note: `${service_area.toUpperCase()} TAXI BOOKING`,
+      metadata: {
+        service_area,
+        pickup,
+        destination
+      }
+    });
+
+    if (pool) {
+      await pool.query(
+        `
+        INSERT INTO bookings
+        (booking_ref, service_area, customer_email, customer_phone,
+         pickup, dropoff, pickup_time, amount_paid, payment_status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid')
+        `,
+        [
+          booking_ref,
+          service_area,
+          email,
+          phone,
+          pickup,
+          destination,
+          `${date} ${time}`,
+          amount / 100
+        ]
+      );
+    }
+
+    await sendBookingEmails({
+      booking_ref,
+      service_area,
+      customer_email: email,
+      customer_phone: phone,
+      pickup,
+      dropoff: destination,
+      pickup_time: `${date} ${time}`,
+      amount_paid: amount / 100
+    });
+
+    res.json({ success: true, booking_ref });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Payment failed" });
+  }
+});
+
+/* =========================
+   ADMIN AUTH
 ========================= */
 function requireAdmin(req, res, next) {
   const auth = req.headers.authorization || "";
-  if (!auth.startsWith("Basic ")) {
-    res.setHeader("WWW-Authenticate", "Basic");
-    return res.status(401).send("Auth required");
-  }
+  if (!auth.startsWith("Basic ")) return res.sendStatus(401);
 
-  const [u, p] = Buffer.from(auth.replace("Basic ", ""), "base64")
+  const [u, p] = Buffer.from(auth.split(" ")[1], "base64")
     .toString()
     .split(":");
 
-  if (u !== process.env.ADMIN_USER || p !== process.env.ADMIN_PASS) {
-    return res.status(401).send("Invalid credentials");
-  }
+  if (u !== process.env.ADMIN_USER || p !== process.env.ADMIN_PASS)
+    return res.sendStatus(403);
 
   next();
 }
 
 /* =========================
-   ROUTES
-========================= */
-app.get("/health", (req, res) => {
-  res.json({ ok: true, time: nowIso() });
-});
-
-/* ---------- CREATE PAYMENT ---------- */
-app.post("/create-payment", async (req, res) => {
-  const {
-    pickup,
-    dropoff,
-    pickup_time,
-    additional_info,
-    email,
-    name,
-    phone,
-    payment_type,
-    price
-  } = req.body;
-
-  const bookingRef = "TTT-" + crypto.randomUUID();
-
-  if (pool) {
-    await pool.query(
-      `
-      INSERT INTO bookings
-      (booking_ref, customer_name, customer_email, customer_phone,
-       pickup, dropoff, pickup_time, additional_info,
-       price, payment_type, amount_paid, payment_status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,'paid')
-      `,
-      [
-        bookingRef,
-        name,
-        email,
-        phone,
-        pickup,
-        dropoff,
-        pickup_time,
-        additional_info,
-        price,
-        payment_type
-      ]
-    );
-  }
-
-  await sendBookingEmails({
-    bookingRef,
-    pickup,
-    dropoff,
-    pickupTime: pickup_time,
-    additionalInfo: additional_info,
-    amountPaid: price,
-    paymentType: payment_type,
-    name,
-    phone,
-    email
-  });
-
-  res.json({
-    booking_ref: bookingRef,
-    review_url: GOOGLE_REVIEW_URL
-  });
-});
-
-/* =========================
-   MANUAL TAXICALLER DISPATCH
-========================= */
-app.post(
-  "/admin/dispatch/:booking_ref",
-  requireAdmin,
-  async (req, res) => {
-    if (!pool) return res.status(503).json({ error: "DB unavailable" });
-    if (!taxiCallerConfigured()) {
-      return res.status(400).json({ error: "TaxiCaller API not configured" });
-    }
-
-    const ref = req.params.booking_ref;
-
-    const r = await pool.query(
-      `SELECT * FROM bookings WHERE booking_ref=$1 LIMIT 1`,
-      [ref]
-    );
-
-    const booking = r.rows[0];
-    if (!booking) return res.status(404).json({ error: "Booking not found" });
-    if (booking.status === "dispatched") {
-      return res.status(400).json({ error: "Already dispatched" });
-    }
-
-    await dispatchToTaxiCaller(booking);
-
-    await pool.query(
-      `UPDATE bookings SET status='dispatched' WHERE booking_ref=$1`,
-      [ref]
-    );
-
-    res.json({ ok: true });
-  }
-);
-
-/* =========================
    ADMIN DASHBOARD
 ========================= */
-app.get("/admin", requireAdmin, async (req, res) => {
+app.get("/admin", requireAdmin, async (_, res) => {
   const rows = pool
     ? (await pool.query(
         `SELECT * FROM bookings ORDER BY created_at DESC`
@@ -332,74 +251,30 @@ app.get("/admin", requireAdmin, async (req, res) => {
     : [];
 
   res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-<title>TTTaxis Admin</title>
-<style>
-body{font-family:Arial;padding:20px}
-table{border-collapse:collapse;width:100%}
-th,td{border:1px solid #ccc;padding:8px}
-th{background:#f5f5f5}
-button{padding:6px 10px;background:#1f7a3f;color:#fff;border:0;border-radius:4px}
-button.disabled{background:#aaa}
-</style>
-</head>
-<body>
-<h2>TTTaxis Admin</h2>
-
-<p>
-<a href="${GOOGLE_REVIEW_URL}" target="_blank">
-⭐ View Google Reviews
-</a>
-</p>
-
-<table>
-<tr><th>Ref</th><th>Route</th><th>Status</th><th>Dispatch</th></tr>
-${rows.map(b => `
-<tr>
-<td>${b.booking_ref}</td>
-<td>${b.pickup} → ${b.dropoff}</td>
-<td>${b.status}</td>
-<td>${
-  b.status === "dispatched"
-    ? "<button class='disabled'>Dispatched</button>"
-    : `<button onclick="dispatch('${b.booking_ref}')">Dispatch</button>`
-}</td>
-</tr>
-`).join("")}
-</table>
-
-<script>
-async function dispatch(ref){
-  if(!confirm("Dispatch " + ref + "?")) return;
-  const res = await fetch("/admin/dispatch/" + ref, {
-    method:"POST",
-    headers:{
-      "Authorization":"Basic " + btoa(prompt("User")+":"+prompt("Pass"))
-    }
-  });
-  const data = await res.json();
-  if(!res.ok) alert(data.error || "Failed");
-  else location.reload();
-}
-</script>
-</body>
-</html>
-`);
+  <h2>TTTaxis Admin</h2>
+  <table border="1" cellpadding="6">
+  <tr><th>Ref</th><th>Area</th><th>Route</th><th>Status</th></tr>
+  ${rows
+    .map(
+      r => `<tr>
+      <td>${r.booking_ref}</td>
+      <td>${r.service_area}</td>
+      <td>${r.pickup} → ${r.dropoff}</td>
+      <td>${r.status}</td>
+      </tr>`
+    )
+    .join("")}
+  </table>
+  `);
 });
 
 /* =========================
-   START SERVER (ONCE)
+   START SERVER
 ========================= */
 (async () => {
-  try {
-    await dbInit();
-  } catch (e) {
-    console.error("DB init failed", e);
-  }
-
-  app.listen(PORT, () => {
-    console.log("TTTaxis backend running on port " + PORT);
-  });
+  await dbInit();
+  app.listen(PORT, () =>
+    console.log("TTTaxis backend running on " + PORT)
+  );
 })();
+

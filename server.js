@@ -23,6 +23,23 @@ const PORT = process.env.PORT || 8080;
 app.use("/square/webhook", express.raw({ type: "application/json" }));
 
 /* =========================
+   SQUARE WEBHOOK HANDLER
+========================= */
+app.post("/square/webhook", (req, res) => {
+  // IMPORTANT: raw body already available as req.body (Buffer)
+  // Signature verification can be added later – this keeps existing flow working
+
+  try {
+    console.log("Square webhook received");
+    res.status(200).send("OK");
+  } catch (err) {
+    console.error("Square webhook error", err);
+    res.status(500).send("Webhook error");
+  }
+});
+
+
+/* =========================
    🔥 GLOBAL CORS + PREFLIGHT FIX
    (THIS FIXES LANCASTER QUOTING)
 ========================= */

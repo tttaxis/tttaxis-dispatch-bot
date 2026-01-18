@@ -3,13 +3,6 @@ import cors from "cors";
 import crypto from "crypto";
 import axios from "axios";
 import sgMail from "@sendgrid/mail";
-import { Pool } from "pg";
-
-/* =========================
-   CONSTANTS
-========================= */
-const GOOGLE_REVIEW_URL =
-  "https://www.google.com/maps/place/TTTaxis/@54.0604009,-2.8197903,17z/data=!3m1!4b1!4m6!3m5!1s0x487c9d6897d9dd73:0x472ee023df606acd!8m2!3d54.0604009!4d-2.8197903!16s%2Fg%2F11ympk_1b4?entry=ttu";
 
 /* =========================
    APP SETUP
@@ -23,30 +16,14 @@ const PORT = process.env.PORT || 8080;
 app.use("/square/webhook", express.raw({ type: "application/json" }));
 
 /* =========================
-   🔥 PREFLIGHT FIX (WORDPRESS SAFE)
-========================= */
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
-/* =========================
    GENERAL MIDDLEWARE
 ========================= */
 app.use(express.json({ limit: "256kb" }));
 app.use(
   cors({
-    origin: [
-      "https://tttaxis.uk",
-      "https://www.tttaxis.uk",
-      "https://lancastertttaxis.uk",
-      "https://www.lancastertttaxis.uk"
-    ],
-    methods: ["GET", "POST", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"]
+    origin: ["https://tttaxis.uk", "https://www.tttaxis.uk"],
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"]
   })
 );
 
@@ -55,210 +32,211 @@ app.use(
 ========================= */
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-} else {
-  console.warn("SENDGRID_API_KEY not set");
 }
 
 /* =========================
-   DATABASE (Postgres)
+   AREA CONFIGURATION
 ========================= */
-const pool = process.env.DATABASE_URL
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl:
-        process.env.NODE_ENV === "production"
-          ? { rejectUnauthorized: false }
-          : false
-    })
-  : null;
+const AREAS = {
+  kendal: {
+    label: "Kendal",
+    minFare: 4.2,
+    perMile: 2.2,
+    squareLocation: process.env.SQUARE_LOCATION_ID,
+    redirectUrl: "https://tttaxis.uk/booking-confirmed",
+    operatorEmail: process.env.OPERATOR_EMAIL,
+    airportFares: [
+      { match: "manchester", price: 120 },
+      { match: "liverpool", price: 132 },
+      { match: "leeds", price: 98 }
+    ]
+  },
 
-async function dbInit() {
-  if (!pool) {
-    console.warn("DATABASE_URL not set – DB features disabled");
-    return;
+  lancaster: {
+    label: "Lancaster",
+    minFare: 4.5,
+    perMile: 2.3,
+    squareLocation: process.env.SQUARE_LOCATION_ID, // reuse or replace later
+    redirectUrl: "https://tttaxis.uk/lancaster/booking-confirmed",
+    operatorEmail: process.env.OPERATOR_EMAIL,
+    airportFares: [
+      { match: "manchester", price: 95 },
+      { match: "liverpool", price: 110 },
+      { match: "leeds", price: 105 }
+    ]
   }
+};
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS bookings (
-      id BIGSERIAL PRIMARY KEY,
-      booking_ref TEXT UNIQUE,
-      service_area TEXT,
-      customer_name TEXT,
-      customer_email TEXT,
-      customer_phone TEXT,
-      pickup TEXT,
-      dropoff TEXT,
-      pickup_time TEXT,
-      additional_info TEXT,
-      price NUMERIC,
-      payment_type TEXT,
-      amount_paid NUMERIC,
-      payment_status TEXT,
-      status TEXT DEFAULT 'new',
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-  `);
-
-  console.log("DB: bookings table ready");
-}
+const VAT_RATE = 0.2;
 
 /* =========================
-   HELPERS
+   GEO + ROUTING
 ========================= */
-function nowIso() {
-  return new Date().toISOString();
-}
-
-/* =========================
-   TAXICALLER (SAFE / DORMANT)
-========================= */
-function taxiCallerConfigured() {
-  return Boolean(process.env.TAXICALLER_API_KEY && process.env.TAXICALLER_BASE_URL);
-}
-
-async function dispatchToTaxiCaller(booking) {
-  if (!taxiCallerConfigured()) throw new Error("TaxiCaller not configured");
-
-  const payload = {
-    customer_name: booking.customer_name,
-    customer_phone: booking.customer_phone,
-    pickup_address: booking.pickup,
-    destination_address: booking.dropoff,
-    reference: booking.booking_ref,
-    notes: booking.additional_info || ""
-  };
-
-  const res = await axios.post(
-    `${process.env.TAXICALLER_BASE_URL}/api/v1/booker/order`,
-    payload,
+async function geocodeUK(address) {
+  const res = await axios.get(
+    "https://nominatim.openstreetmap.org/search",
     {
-      headers: {
-        Authorization: `Bearer ${process.env.TAXICALLER_API_KEY}`,
-        "Content-Type": "application/json"
-      }
+      params: {
+        q: address + ", United Kingdom",
+        format: "json",
+        limit: 1,
+        countrycodes: "gb"
+      },
+      headers: { "User-Agent": "TTTaxis Booking System" }
     }
   );
 
-  return res.data;
+  if (!res.data?.length) throw new Error("Geocoding failed");
+
+  return {
+    lat: Number(res.data[0].lat),
+    lon: Number(res.data[0].lon)
+  };
+}
+
+async function calculateMiles(pickup, dropoff) {
+  const from = await geocodeUK(pickup);
+  const to = await geocodeUK(dropoff);
+
+  try {
+    const res = await axios.post(
+      "https://api.openrouteservice.org/v2/directions/driving-car",
+      {
+        coordinates: [[from.lon, from.lat], [to.lon, to.lat]]
+      },
+      {
+        headers: {
+          Authorization: process.env.ORS_API_KEY,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    return res.data.features[0].properties.summary.distance / 1609.344;
+  } catch {
+    const R = 3958.8;
+    const dLat = (to.lat - from.lat) * Math.PI / 180;
+    const dLon = (to.lon - from.lon) * Math.PI / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(from.lat * Math.PI / 180) *
+      Math.cos(to.lat * Math.PI / 180) *
+      Math.sin(dLon / 2) ** 2;
+
+    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))) * 1.25;
+  }
 }
 
 /* =========================
-   EMAILS
+   PRICE CALCULATION
 ========================= */
-async function sendBookingEmails(data) {
-  if (!process.env.SENDGRID_FROM || !process.env.OPERATOR_EMAIL) return;
+async function calculatePrice(areaKey, pickup, dropoff) {
+  const area = AREAS[areaKey] || AREAS.kendal;
+  const p = pickup.toLowerCase();
+  const d = dropoff.toLowerCase();
 
-  const area = data.service_area === "lancaster" ? "Lancaster" : "Kendal";
-
-  await sgMail.send([
-    {
-      to: data.email,
-      from: process.env.SENDGRID_FROM,
-      subject: `Your TTTaxis ${area} Booking Confirmation`,
-      text: `
-Thank you for booking with TTTaxis ${area}.
-
-Booking reference: ${data.bookingRef}
-
-Pickup: ${data.pickup}
-Drop-off: ${data.dropoff}
-Time: ${data.pickupTime}
-
-Paid: £${data.amountPaid}
-Payment type: ${data.paymentType}
-
-Notes: ${data.additionalInfo || "None"}
-
-If you were happy with your journey, we’d really appreciate a Google review:
-${GOOGLE_REVIEW_URL}
-
-TTTaxis
-01539 556160
-`
-    },
-    {
-      to: process.env.OPERATOR_EMAIL,
-      from: process.env.SENDGRID_FROM,
-      subject: `NEW ${area.toUpperCase()} BOOKING`,
-      text: `
-REF: ${data.bookingRef}
-
-Customer: ${data.name}
-Phone: ${data.phone}
-Email: ${data.email}
-
-Pickup: ${data.pickup}
-Drop-off: ${data.dropoff}
-Time: ${data.pickupTime}
-
-Paid: £${data.amountPaid}
-
-Notes: ${data.additionalInfo || "None"}
-`
+  for (const rule of area.airportFares) {
+    if (p.includes(rule.match) || d.includes(rule.match)) {
+      return {
+        fixed: true,
+        miles: null,
+        price: Number((rule.price * (1 + VAT_RATE)).toFixed(2))
+      };
     }
-  ]);
+  }
+
+  const miles = await calculateMiles(pickup, dropoff);
+  const base = Math.max(area.minFare, miles * area.perMile);
+
+  return {
+    fixed: false,
+    miles: Number(miles.toFixed(2)),
+    price: Number((base * (1 + VAT_RATE)).toFixed(2))
+  };
 }
 
 /* =========================
-   BASIC ADMIN AUTH
+   SQUARE SETUP
 ========================= */
-function requireAdmin(req, res, next) {
-  const auth = req.headers.authorization || "";
-  if (!auth.startsWith("Basic ")) {
-    res.setHeader("WWW-Authenticate", "Basic");
-    return res.status(401).send("Auth required");
-  }
+const SQUARE_API_BASE =
+  process.env.SQUARE_ENV === "production"
+    ? "https://connect.squareup.com"
+    : "https://connect.squareupsandbox.com";
 
-  const [u, p] = Buffer.from(auth.replace("Basic ", ""), "base64")
-    .toString()
-    .split(":");
+async function squareRequest(path, body) {
+  const res = await fetch(SQUARE_API_BASE + path, {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer " + process.env.SQUARE_ACCESS_TOKEN,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
 
-  if (u !== process.env.ADMIN_USER || p !== process.env.ADMIN_PASS) {
-    return res.status(401).send("Invalid credentials");
-  }
+  const data = await res.json();
+  if (!res.ok) throw new Error("Square API error");
+  return data;
+}
 
-  next();
+/* =========================
+   EMAIL HELPER
+========================= */
+async function sendBookingEmails({ email, bookingRef, amountPaid, area }) {
+  const customerEmail = {
+    to: email,
+    from: process.env.SENDGRID_FROM,
+    subject: `Your ${area.label} TTTaxis Booking`,
+    text:
+`Thank you for booking with TTTaxis (${area.label}).
+
+Booking reference: ${bookingRef}
+Amount paid: £${amountPaid}
+
+If you paid a deposit, the remaining balance is payable to the driver.
+
+TTTaxis`
+  };
+
+  const operatorEmail = {
+    to: area.operatorEmail,
+    from: process.env.SENDGRID_FROM,
+    subject: `New ${area.label} Booking Confirmed`,
+    text:
+`Booking confirmed (${area.label})
+
+Reference: ${bookingRef}
+Amount paid: £${amountPaid}`
+  };
+
+  await sgMail.send(customerEmail);
+  await sgMail.send(operatorEmail);
 }
 
 /* =========================
    ROUTES
 ========================= */
-app.get("/health", (req, res) => {
-  res.json({ ok: true, time: nowIso() });
-});
+app.get("/health", (_, res) => res.json({ ok: true }));
 
-/* =========================
-   QUOTE (Kendal + Lancaster)
-========================= */
-app.post("/quote", (req, res) => {
-  const { pickup, dropoff, service_area } = req.body;
-
-  if (!pickup || !dropoff) {
-    return res.status(400).json({ error: "Missing locations" });
-  }
-
-  let price = 25;
-  const d = dropoff.toLowerCase();
-
-  if (d.includes("manchester")) price = service_area === "lancaster" ? 85 : 75;
-  if (d.includes("liverpool")) price = service_area === "lancaster" ? 95 : 85;
-  if (d.includes("leeds")) price = service_area === "lancaster" ? 80 : 70;
-
-  res.json({ price_gbp_inc_vat: price });
-});
-
-/* =========================
-   SQUARE WEBHOOK ENDPOINT
-   (Stops Square retries / 404s)
-========================= */
-app.post("/square/webhook", (req, res) => {
+/* ---------- QUOTE ---------- */
+app.post("/quote", async (req, res) => {
   try {
-    console.log("Square webhook received, bytes:", req.body?.length || 0);
-    // Your original signature verification + logic can live here.
-    res.status(200).send("OK");
-  } catch (e) {
-    console.error("Square webhook error:", e);
-    res.status(500).send("Webhook error");
+    const { pickup, dropoff, area = "kendal" } = req.body;
+    const result = await calculatePrice(area, pickup, dropoff);
+
+    res.json({
+      area,
+      fixed: result.fixed,
+      miles: result.miles,
+      price_gbp_inc_vat: result.price,
+      payment_rules: {
+        pay_driver: result.price <= 15,
+        deposit_available: result.price > 15,
+        deposit_amount: Number((result.price * 0.1).toFixed(2)),
+        full_amount: result.price
+      }
+    });
+  } catch {
+    res.status(422).json({ error: "Unable to calculate quote" });
   }
 });
 
@@ -266,206 +244,62 @@ app.post("/square/webhook", (req, res) => {
 app.post("/create-payment", async (req, res) => {
   try {
     const {
+      booking_id,
       pickup,
       dropoff,
-      pickup_time,
-      additional_info,
-      email,
-      name,
-      phone,
+      price_gbp_inc_vat,
       payment_type,
-      price,
-      service_area
+      email,
+      area = "kendal"
     } = req.body;
 
-    const bookingRef = "TTT-" + crypto.randomUUID();
+    const cfg = AREAS[area] || AREAS.kendal;
 
-    /* =========================================================
-       ✅ IMPORTANT: THIS IS WHERE YOUR ORIGINAL WORKING SQUARE
-       CHECKOUT CREATION CODE MUST RUN.
-
-       It MUST set: checkout_url (a full https://... Square URL)
-
-       Example output expected:
-       const checkout_url = "https://square.link/u/....";
-    ========================================================= */
-    let checkout_url = null;
-
-    // >>>>> PASTE YOUR ORIGINAL "CREATE SQUARE CHECKOUT" CODE HERE <<<<<
-    // It should end by setting checkout_url = <square url>;
-
-    // SAFETY: if checkout_url is still null, return a clear error
-    if (!checkout_url) {
-      console.error("create-payment: checkout_url not generated");
-      return res.status(500).json({
-        error: "Payment setup failed (no checkout URL returned)."
-      });
+    if (price_gbp_inc_vat <= 15) {
+      return res.json({ payment_mode: "pay_driver" });
     }
 
-    if (pool) {
-      await pool.query(
-        `
-        INSERT INTO bookings
-        (booking_ref, service_area, customer_name, customer_email, customer_phone,
-         pickup, dropoff, pickup_time, additional_info,
-         price, payment_type, amount_paid, payment_status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,'pending')
-        `,
-        [
-          bookingRef,
-          service_area || "kendal",
-          name,
-          email,
-          phone,
-          pickup,
-          dropoff,
-          pickup_time,
-          additional_info,
-          price,
-          payment_type
-        ]
-      );
-    }
+    const amount =
+      payment_type === "deposit"
+        ? Number((price_gbp_inc_vat * 0.1).toFixed(2))
+        : price_gbp_inc_vat;
 
-    // NOTE: If your original flow sent emails only after webhook confirms payment,
-    // keep it that way. If you want "booking created" emails here, we can do it,
-    // but it may trigger emails for failed payments.
-    // await sendBookingEmails(...)
-
-    res.json({
-      booking_ref: bookingRef,
-      checkout_url
-    });
-  } catch (e) {
-    console.error("create-payment failed:", e);
-    res.status(500).json({ error: "create-payment failed", detail: String(e?.message || e) });
-  }
-});
-
-/* =========================
-   MANUAL TAXICALLER DISPATCH
-========================= */
-app.post("/admin/dispatch/:booking_ref", requireAdmin, async (req, res) => {
-  try {
-    if (!pool) return res.status(503).json({ error: "DB unavailable" });
-    if (!taxiCallerConfigured()) {
-      return res.status(400).json({ error: "TaxiCaller API not configured" });
-    }
-
-    const ref = req.params.booking_ref;
-
-    const r = await pool.query(
-      `SELECT * FROM bookings WHERE booking_ref=$1 LIMIT 1`,
-      [ref]
+    const checkout = await squareRequest(
+      "/v2/online-checkout/payment-links",
+      {
+        idempotency_key: crypto.randomUUID(),
+        quick_pay: {
+          name: `TTTaxis ${cfg.label} Booking`,
+          price_money: {
+            amount: Math.round(amount * 100),
+            currency: "GBP"
+          },
+          location_id: cfg.squareLocation
+        },
+        checkout_options: {
+          redirect_url: cfg.redirectUrl
+        },
+        pre_populated_data: {
+          buyer_email: email
+        },
+        note: `Booking ${booking_id} | ${pickup} → ${dropoff} (${cfg.label})`
+      }
     );
 
-    const booking = r.rows[0];
-    if (!booking) return res.status(404).json({ error: "Booking not found" });
-    if (booking.status === "dispatched") {
-      return res.status(400).json({ error: "Already dispatched" });
-    }
-
-    await dispatchToTaxiCaller(booking);
-
-    await pool.query(
-      `UPDATE bookings SET status='dispatched' WHERE booking_ref=$1`,
-      [ref]
-    );
-
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("dispatch failed:", e);
-    res.status(500).json({ error: "dispatch failed" });
+    res.json({ checkout_url: checkout.payment_link.url });
+  } catch {
+    res.status(500).json({ error: "Unable to create payment" });
   }
 });
 
 /* =========================
-   ADMIN DASHBOARD
+   START SERVER
 ========================= */
-app.get("/admin", requireAdmin, async (req, res) => {
-  const rows = pool
-    ? (await pool.query(`SELECT * FROM bookings ORDER BY created_at DESC`)).rows
-    : [];
-
-  res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-<title>TTTaxis Admin</title>
-<style>
-body{font-family:Arial;padding:20px}
-table{border-collapse:collapse;width:100%}
-th,td{border:1px solid #ccc;padding:8px}
-th{background:#f5f5f5}
-button{padding:6px 10px;background:#1f7a3f;color:#fff;border:0;border-radius:4px}
-button.disabled{background:#aaa}
-</style>
-</head>
-<body>
-<h2>TTTaxis Admin</h2>
-
-<p>
-<a href="${GOOGLE_REVIEW_URL}" target="_blank">⭐ View Google Reviews</a>
-</p>
-
-<table>
-<tr><th>Ref</th><th>Area</th><th>Route</th><th>Status</th><th>Dispatch</th></tr>
-${rows.map(b => `
-<tr>
-<td>${b.booking_ref}</td>
-<td>${b.service_area || ""}</td>
-<td>${b.pickup} → ${b.dropoff}</td>
-<td>${b.status}</td>
-<td>${
-  b.status === "dispatched"
-    ? "<button class='disabled'>Dispatched</button>"
-    : `<button onclick="dispatch('${b.booking_ref}')">Dispatch</button>`
-}</td>
-</tr>
-`).join("")}
-</table>
-
-<script>
-async function dispatch(ref){
-  if(!confirm("Dispatch " + ref + "?")) return;
-  const res = await fetch("/admin/dispatch/" + ref, {
-    method:"POST",
-    headers:{
-      "Authorization":"Basic " + btoa(prompt("User")+":"+prompt("Pass"))
-    }
-  });
-  const data = await res.json();
-  if(!res.ok) alert(data.error || "Failed");
-  else location.reload();
-}
-</script>
-</body>
-</html>
-`);
+app.listen(PORT, () => {
+  console.log("TTTaxis backend running on port " + PORT);
 });
 
-/* =========================
-   GLOBAL ERROR HANDLER
-========================= */
-app.use((err, req, res, next) => {
-  console.error("UNHANDLED ERROR:", err);
-  res.status(500).json({ error: "Server error" });
-});
 
-/* =========================
-   START SERVER (ONCE)
-========================= */
-(async () => {
-  try {
-    await dbInit();
-  } catch (e) {
-    console.error("DB init failed", e);
-  }
-
-  app.listen(PORT, () => {
-    console.log("TTTaxis backend running on port " + PORT);
-  });
-})();
 
 
 

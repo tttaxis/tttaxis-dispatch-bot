@@ -12,6 +12,7 @@ const PORT = process.env.PORT || 8080;
 
 /* =========================
    RAW BODY (Square Webhook)
+   ⚠ MUST be before express.json()
 ========================= */
 app.use("/square/webhook", express.raw({ type: "application/json" }));
 
@@ -51,12 +52,11 @@ const AREAS = {
       { match: "leeds", price: 98 }
     ]
   },
-
   lancaster: {
     label: "Lancaster",
     minFare: 4.5,
     perMile: 2.3,
-    squareLocation: process.env.SQUARE_LOCATION_ID, // reuse or replace later
+    squareLocation: process.env.SQUARE_LOCATION_ID,
     redirectUrl: "https://tttaxis.uk/lancaster/booking-confirmed",
     operatorEmail: process.env.OPERATOR_EMAIL,
     airportFares: [
@@ -101,9 +101,7 @@ async function calculateMiles(pickup, dropoff) {
   try {
     const res = await axios.post(
       "https://api.openrouteservice.org/v2/directions/driving-car",
-      {
-        coordinates: [[from.lon, from.lat], [to.lon, to.lat]]
-      },
+      { coordinates: [[from.lon, from.lat], [to.lon, to.lat]] },
       {
         headers: {
           Authorization: process.env.ORS_API_KEY,
@@ -213,6 +211,18 @@ Amount paid: £${amountPaid}`
 }
 
 /* =========================
+   SQUARE SIGNATURE VERIFY
+========================= */
+function verifySquareSignature(rawBody, signature) {
+  const hmac = crypto
+    .createHmac("sha1", process.env.SQUARE_WEBHOOK_SIGNATURE_KEY)
+    .update(rawBody)
+    .digest("base64");
+
+  return hmac === signature;
+}
+
+/* =========================
    ROUTES
 ========================= */
 app.get("/health", (_, res) => res.json({ ok: true }));
@@ -292,12 +302,55 @@ app.post("/create-payment", async (req, res) => {
   }
 });
 
+/* ---------- SQUARE WEBHOOK ---------- */
+app.post("/square/webhook", async (req, res) => {
+  try {
+    const signature = req.headers["x-square-hmacsha256-signature"];
+    const rawBody = req.body.toString("utf8");
+
+    if (!signature || !verifySquareSignature(rawBody, signature)) {
+      return res.status(401).send("Invalid signature");
+    }
+
+    const event = JSON.parse(rawBody);
+
+    if (event.type !== "payment.updated") {
+      return res.status(200).send("Ignored");
+    }
+
+    const payment = event.data.object.payment;
+
+    if (payment.status !== "COMPLETED") {
+      return res.status(200).send("Not completed");
+    }
+
+    const amountPaid = payment.amount_money.amount / 100;
+    const bookingRef = payment.note || "TTTAXIS";
+    const customerEmail = payment.buyer_email_address;
+
+    if (customerEmail) {
+      await sendBookingEmails({
+        email: customerEmail,
+        bookingRef,
+        amountPaid,
+        area: AREAS.lancaster // safe default; can be refined later
+      });
+    }
+
+    res.status(200).send("OK");
+  } catch (err) {
+    console.error("Webhook error:", err.message);
+    res.status(500).send("Webhook error");
+  }
+});
+
 /* =========================
    START SERVER
 ========================= */
 app.listen(PORT, () => {
   console.log("TTTaxis backend running on port " + PORT);
 });
+
 
 
 

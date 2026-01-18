@@ -163,6 +163,32 @@ async function calculatePrice(areaKey, pickup, dropoff) {
 }
 
 /* =========================
+   SQUARE SETUP
+========================= */
+const SQUARE_API_BASE =
+  process.env.SQUARE_ENV === "production"
+    ? "https://connect.squareup.com"
+    : "https://connect.squareupsandbox.com";
+
+async function squareRequest(path, body) {
+  const res = await fetch(SQUARE_API_BASE + path, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.SQUARE_ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    console.error("Square API error:", data);
+    throw new Error("Square API error");
+  }
+  return data;
+}
+
+/* =========================
    SQUARE WEBHOOK VERIFY
 ========================= */
 function verifySquareSignature(rawBody, signature) {
@@ -179,6 +205,7 @@ function verifySquareSignature(rawBody, signature) {
 ========================= */
 app.get("/health", (_, res) => res.json({ ok: true }));
 
+/* ---------- QUOTE ---------- */
 app.post("/quote", async (req, res) => {
   try {
     const { pickup, dropoff, area = "kendal" } = req.body;
@@ -192,6 +219,65 @@ app.post("/quote", async (req, res) => {
     });
   } catch {
     res.status(422).json({ error: "Unable to calculate quote" });
+  }
+});
+
+/* ---------- CREATE PAYMENT ---------- */
+app.post("/create-payment", async (req, res) => {
+  try {
+    const {
+      booking_id,
+      pickup,
+      dropoff,
+      email,
+      price_gbp_inc_vat,
+      payment_type,
+      area = "kendal"
+    } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    if (price_gbp_inc_vat <= 15) {
+      return res.json({ payment_mode: "pay_driver" });
+    }
+
+    const cfg = AREAS[area] || AREAS.kendal;
+
+    const amount =
+      payment_type === "deposit"
+        ? Number((price_gbp_inc_vat * 0.1).toFixed(2))
+        : price_gbp_inc_vat;
+
+    const checkout = await squareRequest(
+      "/v2/online-checkout/payment-links",
+      {
+        idempotency_key: crypto.randomUUID(),
+        quick_pay: {
+          name: `TTTaxis ${cfg.label} Booking`,
+          price_money: {
+            amount: Math.round(amount * 100),
+            currency: "GBP"
+          },
+          location_id: cfg.squareLocation
+        },
+        checkout_options: {
+          redirect_url: cfg.redirectUrl
+        },
+        pre_populated_data: {
+          buyer_email: email
+        },
+        note: booking_id || "TTTAXIS"
+      }
+    );
+
+    res.json({
+      checkout_url: checkout.payment_link.url
+    });
+  } catch (err) {
+    console.error("Create payment error:", err.message);
+    res.status(500).json({ error: "Unable to create payment" });
   }
 });
 

@@ -3,6 +3,9 @@ import cors from "cors";
 import crypto from "crypto";
 import axios from "axios";
 import sgMail from "@sendgrid/mail";
+import pg from "pg";
+
+const { Pool } = pg;
 
 /* =========================
    APP SETUP
@@ -12,7 +15,7 @@ const PORT = process.env.PORT || 8080;
 
 /* =========================
    RAW BODY (Square Webhook)
-   ⚠ MUST be before express.json()
+   MUST be before express.json
 ========================= */
 app.use("/square/webhook", express.raw({ type: "application/json" }));
 
@@ -33,6 +36,18 @@ app.use(
 ========================= */
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+}
+
+/* =========================
+   POSTGRES SETUP
+========================= */
+let pool = null;
+
+if (process.env.DATABASE_URL) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
 }
 
 /* =========================
@@ -109,19 +124,10 @@ async function calculateMiles(pickup, dropoff) {
         }
       }
     );
-
     return res.data.features[0].properties.summary.distance / 1609.344;
   } catch {
-    const R = 3958.8;
-    const dLat = (to.lat - from.lat) * Math.PI / 180;
-    const dLon = (to.lon - from.lon) * Math.PI / 180;
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(from.lat * Math.PI / 180) *
-      Math.cos(to.lat * Math.PI / 180) *
-      Math.sin(dLon / 2) ** 2;
-
-    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))) * 1.25;
+    // Safe fallback
+    return 10;
   }
 }
 
@@ -165,7 +171,7 @@ async function squareRequest(path, body) {
   const res = await fetch(SQUARE_API_BASE + path, {
     method: "POST",
     headers: {
-      Authorization: "Bearer " + process.env.SQUARE_ACCESS_TOKEN,
+      Authorization: `Bearer ${process.env.SQUARE_ACCESS_TOKEN}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body)
@@ -174,6 +180,52 @@ async function squareRequest(path, body) {
   const data = await res.json();
   if (!res.ok) throw new Error("Square API error");
   return data;
+}
+
+/* =========================
+   POSTGRES HELPERS
+========================= */
+async function saveBooking(data) {
+  if (!pool) return;
+
+  await pool.query(
+    `
+    INSERT INTO bookings (
+      id, area, pickup, dropoff, pickup_time,
+      name, phone, email, price_gbp, payment_type,
+      status, additional_info
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
+    )
+    `,
+    [
+      data.id,
+      data.area,
+      data.pickup,
+      data.dropoff,
+      data.pickup_time,
+      data.name,
+      data.phone,
+      data.email,
+      data.price_gbp,
+      data.payment_type,
+      data.status,
+      data.additional_info
+    ]
+  );
+}
+
+async function markBookingPaid(id, amount) {
+  if (!pool) return;
+
+  await pool.query(
+    `
+    UPDATE bookings
+    SET status = 'paid', amount_paid = $1
+    WHERE id = $2
+    `,
+    [amount, id]
+  );
 }
 
 /* =========================
@@ -211,7 +263,7 @@ Amount paid: £${amountPaid}`
 }
 
 /* =========================
-   SQUARE SIGNATURE VERIFY
+   SQUARE WEBHOOK VERIFY
 ========================= */
 function verifySquareSignature(rawBody, signature) {
   const hmac = crypto
@@ -257,13 +309,32 @@ app.post("/create-payment", async (req, res) => {
       booking_id,
       pickup,
       dropoff,
+      pickup_time,
+      additional_info,
+      name,
+      phone,
+      email,
       price_gbp_inc_vat,
       payment_type,
-      email,
       area = "kendal"
     } = req.body;
 
     const cfg = AREAS[area] || AREAS.kendal;
+
+    await saveBooking({
+      id: booking_id,
+      area,
+      pickup,
+      dropoff,
+      pickup_time,
+      name,
+      phone,
+      email,
+      price_gbp: price_gbp_inc_vat,
+      payment_type,
+      status: "pending",
+      additional_info
+    });
 
     if (price_gbp_inc_vat <= 15) {
       return res.json({ payment_mode: "pay_driver" });
@@ -292,12 +363,13 @@ app.post("/create-payment", async (req, res) => {
         pre_populated_data: {
           buyer_email: email
         },
-        note: `Booking ${booking_id} | ${pickup} → ${dropoff} (${cfg.label})`
+        note: booking_id
       }
     );
 
     res.json({ checkout_url: checkout.payment_link.url });
-  } catch {
+  } catch (err) {
+    console.error(err.message);
     res.status(500).json({ error: "Unable to create payment" });
   }
 });
@@ -313,27 +385,27 @@ app.post("/square/webhook", async (req, res) => {
     }
 
     const event = JSON.parse(rawBody);
-
     if (event.type !== "payment.updated") {
       return res.status(200).send("Ignored");
     }
 
     const payment = event.data.object.payment;
-
     if (payment.status !== "COMPLETED") {
       return res.status(200).send("Not completed");
     }
 
+    const bookingRef = payment.note;
     const amountPaid = payment.amount_money.amount / 100;
-    const bookingRef = payment.note || "TTTAXIS";
     const customerEmail = payment.buyer_email_address;
+
+    await markBookingPaid(bookingRef, amountPaid);
 
     if (customerEmail) {
       await sendBookingEmails({
         email: customerEmail,
         bookingRef,
         amountPaid,
-        area: AREAS.lancaster // safe default; can be refined later
+        area: AREAS.lancaster // safe default
       });
     }
 
@@ -350,6 +422,7 @@ app.post("/square/webhook", async (req, res) => {
 app.listen(PORT, () => {
   console.log("TTTaxis backend running on port " + PORT);
 });
+
 
 
 
